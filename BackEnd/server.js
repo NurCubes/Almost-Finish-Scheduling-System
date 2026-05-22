@@ -802,37 +802,94 @@ app.get("/api/superadmin/instructors", isAuthenticated, isSuperAdmin, async (req
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-/* ══════════════════════════ SUBJECT SETUP ══════════════════════════ */
 
-// GET all subjects for dept
+
+
+
 app.get("/api/subjects", isAuthenticated, async (req, res) => {
   try {
     const schema = getSchema(req) || "public";
+    const { semester } = req.query;
+    const params = [];
+    let whereClause = "";
+    if (semester) {
+      params.push(semester);
+      whereClause = `WHERE semester = $1`;
+    }
     const { rows } = await pool.query(
-      `SELECT * FROM ${schema}.subjects ORDER BY year_level, subject_type, subject_name`
+      `SELECT id, subject_name, subject_code, subject_description,
+              subject_type, semester, year_level, units
+       FROM ${schema}.subjects
+       ${whereClause}
+       ORDER BY year_level, subject_type, subject_name`,
+      params
     );
     res.json(rows);
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// POST create subject
+
+
+
+
+
+
+
+
+
+
 app.post("/api/subjects", isAuthenticated, async (req, res) => {
   try {
     const schema = getSchema(req) || "public";
-    let { subject_name, subject_type = "Major", semester = "1st Semester", year_level = 1, units = 3 } = req.body;
-    if (!subject_name?.trim()) return res.status(400).json({ error: "Subject name is required." });
-    subject_name = subject_name.trim().replace(/\s+/g, " ");
+    let {
+      subject_name,
+      subject_code       = "",
+      subject_description = "",
+      subject_type       = "Major",
+      semester           = "1st Semester",
+      year_level         = 1,
+      units              = 3,
+    } = req.body;
 
-    const dup = await pool.query(
+    if (!subject_name?.trim())
+      return res.status(400).json({ error: "Subject name is required." });
+
+    subject_name        = subject_name.trim().replace(/\s+/g, " ");
+    subject_code        = (subject_code || "").trim().toUpperCase();
+    subject_description = (subject_description || "").trim();
+
+    // Check duplicate name
+    const dupName = await pool.query(
       `SELECT id FROM ${schema}.subjects WHERE LOWER(subject_name) = LOWER($1)`,
       [subject_name]
     );
-    if (dup.rows[0]) return res.status(409).json({ error: `"${subject_name}" already exists in this department.` });
+    if (dupName.rows[0])
+      return res.status(409).json({ error: `"${subject_name}" already exists in this department.` });
+
+    // Check duplicate code (only if provided)
+    if (subject_code) {
+      const dupCode = await pool.query(
+        `SELECT id FROM ${schema}.subjects WHERE subject_code = $1`,
+        [subject_code]
+      );
+      if (dupCode.rows[0])
+        return res.status(409).json({ error: `Subject code "${subject_code}" is already used.` });
+    }
 
     const { rows } = await pool.query(
-      `INSERT INTO ${schema}.subjects (subject_name, subject_type, semester, year_level, units)
-       VALUES ($1,$2,$3,$4,$5) RETURNING *`,
-      [subject_name, subject_type, semester, parseInt(year_level), parseInt(units)]
+      `INSERT INTO ${schema}.subjects
+         (subject_name, subject_code, subject_description, subject_type, semester, year_level, units)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)
+       RETURNING *`,
+      [
+        subject_name,
+        subject_code        || null,
+        subject_description || "",
+        subject_type,
+        semester,
+        parseInt(year_level),
+        parseInt(units),
+      ]
     );
     res.json(rows[0]);
   } catch (e) { res.status(500).json({ error: e.message }); }
@@ -843,21 +900,62 @@ app.put("/api/subjects/:id", isAuthenticated, async (req, res) => {
   try {
     const schema = getSchema(req) || "public";
     const { id } = req.params;
-    let { subject_name, subject_type, semester, year_level, units } = req.body;
-    if (!subject_name?.trim()) return res.status(400).json({ error: "Subject name is required." });
-    subject_name = subject_name.trim().replace(/\s+/g, " ");
+    let {
+      subject_name,
+      subject_code       = "",
+      subject_description = "",
+      subject_type,
+      semester,
+      year_level,
+      units,
+    } = req.body;
 
-    const dup = await pool.query(
+    if (!subject_name?.trim())
+      return res.status(400).json({ error: "Subject name is required." });
+
+    subject_name        = subject_name.trim().replace(/\s+/g, " ");
+    subject_code        = (subject_code || "").trim().toUpperCase();
+    subject_description = (subject_description || "").trim();
+
+    // Check duplicate name (exclude self)
+    const dupName = await pool.query(
       `SELECT id FROM ${schema}.subjects WHERE LOWER(subject_name) = LOWER($1) AND id != $2`,
       [subject_name, id]
     );
-    if (dup.rows[0]) return res.status(409).json({ error: `"${subject_name}" already exists in this department.` });
+    if (dupName.rows[0])
+      return res.status(409).json({ error: `"${subject_name}" already exists in this department.` });
+
+    // Check duplicate code (exclude self, only if provided)
+    if (subject_code) {
+      const dupCode = await pool.query(
+        `SELECT id FROM ${schema}.subjects WHERE subject_code = $1 AND id != $2`,
+        [subject_code, id]
+      );
+      if (dupCode.rows[0])
+        return res.status(409).json({ error: `Subject code "${subject_code}" is already used.` });
+    }
 
     const { rows } = await pool.query(
       `UPDATE ${schema}.subjects
-       SET subject_name=$1, subject_type=$2, semester=$3, year_level=$4, units=$5
-       WHERE id=$6 RETURNING *`,
-      [subject_name, subject_type, semester, parseInt(year_level), parseInt(units), id]
+       SET subject_name        = $1,
+           subject_code        = $2,
+           subject_description = $3,
+           subject_type        = $4,
+           semester            = $5,
+           year_level          = $6,
+           units               = $7
+       WHERE id = $8
+       RETURNING *`,
+      [
+        subject_name,
+        subject_code        || null,
+        subject_description || "",
+        subject_type,
+        semester,
+        parseInt(year_level),
+        parseInt(units),
+        id,
+      ]
     );
     if (!rows[0]) return res.status(404).json({ error: "Subject not found." });
     res.json(rows[0]);
@@ -915,7 +1013,7 @@ app.get("/api/instructor-pool", isAuthenticated, async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// POST create instructor via pool (with employment_type + active_semesters)
+// POST create instructor via pool
 app.post("/api/instructor-pool", isAuthenticated, async (req, res) => {
   try {
     const schema = getSchema(req) || "public";
@@ -944,7 +1042,7 @@ app.post("/api/instructor-pool", isAuthenticated, async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// PUT update instructor employment_type + active_semesters (and optionally name/email)
+// PUT update instructor
 app.put("/api/instructor-pool/:id", isAuthenticated, async (req, res) => {
   try {
     const schema = getSchema(req) || "public";
@@ -1031,8 +1129,8 @@ app.get("/api/instructor-assignments", isAuthenticated, async (req, res) => {
             SELECT ia.id, ia.semester,
                    i.id AS instructor_id, i.name AS instructor_name,
                    COALESCE(i.employment_type,'Permanent') AS employment_type,
-                   s.id AS subject_id, s.subject_name, s.subject_type,
-                   s.year_level, s.units,
+                   s.id AS subject_id, s.subject_name, s.subject_code,
+                   s.subject_description, s.subject_type, s.year_level, s.units,
                    '${dept.toUpperCase()}' AS dept_code
             FROM ${dept}.instructor_assignments ia
             JOIN ${dept}.instructors i ON ia.instructor_id = i.id
@@ -1055,8 +1153,8 @@ app.get("/api/instructor-assignments", isAuthenticated, async (req, res) => {
       SELECT ia.id, ia.semester,
              i.id AS instructor_id, i.name AS instructor_name,
              COALESCE(i.employment_type,'Permanent') AS employment_type,
-             s.id AS subject_id, s.subject_name, s.subject_type,
-             s.year_level, s.units
+             s.id AS subject_id, s.subject_name, s.subject_code,
+             s.subject_description, s.subject_type, s.year_level, s.units
       FROM ${schema}.instructor_assignments ia
       JOIN ${schema}.instructors i ON ia.instructor_id = i.id
       JOIN ${schema}.subjects s    ON ia.subject_id    = s.id
@@ -1098,8 +1196,8 @@ app.post("/api/instructor-assignments", isAuthenticated, async (req, res) => {
       SELECT ia.id, ia.semester,
              i.id AS instructor_id, i.name AS instructor_name,
              COALESCE(i.employment_type,'Permanent') AS employment_type,
-             s.id AS subject_id, s.subject_name, s.subject_type,
-             s.year_level, s.units
+             s.id AS subject_id, s.subject_name, s.subject_code,
+             s.subject_description, s.subject_type, s.year_level, s.units
       FROM ${schema}.instructor_assignments ia
       JOIN ${schema}.instructors i ON ia.instructor_id = i.id
       JOIN ${schema}.subjects s    ON ia.subject_id    = s.id
@@ -1194,9 +1292,9 @@ seedAdminIfNeeded().then(async () => {
   let sc = 0, ssc = 0, ic = 0;
   for (const dept of ALL_DEPTS) {
     try {
-      sc += parseInt((await pool.query(`SELECT COUNT(*) AS c FROM ${dept}.schedules WHERE is_break=FALSE`)).rows[0].c);
+      sc  += parseInt((await pool.query(`SELECT COUNT(*) AS c FROM ${dept}.schedules WHERE is_break=FALSE`)).rows[0].c);
       ssc += parseInt((await pool.query(`SELECT COUNT(*) AS c FROM ${dept}.student_schedules WHERE is_break=FALSE`)).rows[0].c);
-      ic += parseInt((await pool.query(`SELECT COUNT(*) AS c FROM ${dept}.instructors`)).rows[0].c);
+      ic  += parseInt((await pool.query(`SELECT COUNT(*) AS c FROM ${dept}.instructors`)).rows[0].c);
     } catch (_) {}
   }
   const dc = parseInt((await pool.query("SELECT COUNT(*) AS c FROM departments")).rows[0].c);
