@@ -1,8 +1,4 @@
 {
-  "scripts": {
-    "db:migrate": "node db/migrate.js",
-    "db:fresh": "node db/migrate.js --fresh"
-  },
   "dependencies": {
     "bcrypt": "^6.0.0",
     "better-sqlite3": "^12.8.0",
