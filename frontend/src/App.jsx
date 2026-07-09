@@ -6,8 +6,9 @@ import { DeptLogo, PCCLogo } from "./LogoMap.jsx";
 
 const DAY_START = 7;
 const DAY_END   = 20;
+const TIME_STEP = 0.5;
 const DAYS  = ["Monday","Tuesday","Wednesday","Thursday","Friday","Saturday","Sunday"];
-const TIMES = Array.from({ length: DAY_END - DAY_START }, (_, i) => DAY_START + i);
+const TIMES = Array.from({ length: Math.round((DAY_END - DAY_START) / TIME_STEP) }, (_, i) => +(DAY_START + i * TIME_STEP).toFixed(1));
 const LECTURE_ROOMS = ["Room 1","Room 2","Room 3","Room 4","Room 5"];
 const LAB_ROOMS     = ["Lab A","Lab B","Lab C"];
 const ALL_ROOMS     = [...LECTURE_ROOMS, ...LAB_ROOMS];
@@ -56,6 +57,8 @@ function normName(s) { return (s || "").trim().replace(/\s+/g," ").toLowerCase()
 function insertBreaks(blocks) {
   if (!blocks.length) return blocks;
   const sorted = [...blocks].sort((a, b) => a.start - b.start);
+
+  // Step 1 — carve out the fixed lunch window, same as before.
   const withLunch = [];
   let lunchDone = false;
   for (const b of sorted) {
@@ -74,36 +77,92 @@ function insertBreaks(blocks) {
       withLunch.push(b);
     }
   }
-  const result  = [];
-  let teachRun  = 0;
-  let prevEnd   = null;
-  for (const b of withLunch) {
-    if (b.is_break) { result.push(b); teachRun = 0; prevEnd = b.end; continue; }
-    if (prevEnd !== null && b.start > prevEnd) teachRun = 0;
-    let cur = { ...b };
-    while (cur.start < cur.end) {
-      const canTeach = +(BREAK_TRIGGER - teachRun).toFixed(1);
-      const dur      = +(cur.end - cur.start).toFixed(1);
-      if (dur <= canTeach) {
-        result.push(cur); teachRun = +(teachRun + dur).toFixed(1); prevEnd = cur.end;
-        if (teachRun >= BREAK_TRIGGER) {
-          const bEnd = +(cur.end + BREAK_DUR).toFixed(1);
-          result.push({ ...b, subject:"BREAK", room:"—", roomType:"Break", section:"", instructor:"", start:cur.end, end:bEnd, is_break:true });
-          prevEnd = bEnd; teachRun = 0;
-        }
-        break;
-      } else {
-        const splitEnd = +(cur.start + canTeach).toFixed(1);
-        const leftover = +(cur.end - splitEnd).toFixed(1);
-        const breakEnd = +(splitEnd + BREAK_DUR).toFixed(1);
-        result.push({ ...cur, end: splitEnd });
-        result.push({ ...b, subject:"BREAK", room:"—", roomType:"Break", section:"", instructor:"", start:splitEnd, end:breakEnd, is_break:true });
-        cur = { ...cur, start: breakEnd, end: +(breakEnd + leftover).toFixed(1) };
-        prevEnd = breakEnd; teachRun = 0;
+
+  // Step 2 — walk the day as ONE continuous timeline. Every 4 cumulative
+  // hours of class triggers a 1-hour break, and everything scheduled after
+  // that point is pushed later by the break's duration, so the remaining
+  // class time visibly continues right after the break instead of being
+  // silently dropped or left overlapping the break slot.
+  const result = [];
+  let cursor = null;   // current point on the *shifted* timeline
+  let hoursSincePause = 0;
+  let shift = 0;        // cumulative time we've pushed everything after this later by
+
+  for (const raw of withLunch) {
+    let bStart = +(raw.start + shift).toFixed(1);
+    let bEnd   = +(raw.end   + shift).toFixed(1);
+
+    if (raw.is_break) {
+      // A pre-existing break (lunch, or one already in the raw data).
+      // Shift it onto the current timeline, reset the class-hour counter.
+      result.push({ ...raw, start: bStart, end: bEnd });
+      cursor = bEnd;
+      hoursSincePause = 0;
+      continue;
+    }
+
+    if (cursor !== null) {
+      if (bStart > cursor) {
+        hoursSincePause = 0; // genuine gap — fresh run of class time
+      } else if (bStart < cursor) {
+        if (bEnd <= cursor) continue; // fully-covered duplicate — skip
+        bStart = cursor;               // trim the overlapping portion
       }
     }
+
+    let segStart = bStart;
+    let remaining = +(bEnd - bStart).toFixed(1);
+    if (remaining <= 0) { cursor = bEnd; continue; }
+
+    while (remaining > 0) {
+      const room  = +(BREAK_TRIGGER - hoursSincePause).toFixed(1);
+      const chunk = Math.min(room, remaining);
+      if (chunk > 0) {
+        const chunkEnd = +(segStart + chunk).toFixed(1);
+        result.push({ ...raw, start: segStart, end: chunkEnd });
+        hoursSincePause = +(hoursSincePause + chunk).toFixed(1);
+        segStart = chunkEnd;
+        remaining = +(remaining - chunk).toFixed(1);
+      }
+      if (hoursSincePause >= BREAK_TRIGGER) {
+        const breakEnd = +(segStart + BREAK_DUR).toFixed(1);
+        result.push({ ...raw, subject:"BREAK", room:"—", roomType:"Break", section:"", instructor:"", start: segStart, end: breakEnd, is_break:true });
+        shift = +(shift + BREAK_DUR).toFixed(1); // push everything after this later
+        segStart = breakEnd;
+        hoursSincePause = 0;
+      } else {
+        break; // this block is done, trigger not hit yet — move to next block
+      }
+    }
+    cursor = segStart;
   }
+
   return result;
+}
+// ── NEW: recognizes the same class recorded on both the instructor side
+// and student side, even if per-table break insertion made their exact
+// start/end drift apart slightly. This must come BEFORE the type checks,
+// otherwise dragging a class back near its own linked entry falsely
+// flags a self-conflict.
+function isSameSession(a, b) {
+  if (normName(a.subject) !== normName(b.subject)) return false;
+  if (a.day !== b.day) return false;
+
+  const aSec = normName(a.section), bSec = normName(b.section);
+  const aIns = normName(a.instructor), bIns = normName(b.instructor);
+
+  // If both sides specify a section, it must match to be "the same class".
+  if (aSec && bSec && aSec !== bSec) return false;
+  // If both sides specify an instructor, it must match too.
+  if (aIns && bIns && aIns !== bIns) return false;
+  // Need at least one shared identifying field, or there's nothing linking them.
+  if (!((aSec && bSec) || (aIns && bIns))) return false;
+
+  const overlaps  = a.start < b.end && b.start < a.end;
+  const tolerance = Math.max(BREAK_DUR, 1); // tolerate one break-width of drift
+  const closeTime = Math.abs(a.start - b.start) <= tolerance && Math.abs(a.end - b.end) <= tolerance;
+
+  return overlaps || closeTime;
 }
 
 function detectConflicts(schedules) {
@@ -113,20 +172,24 @@ function detectConflicts(schedules) {
       const a = schedules[i], b = schedules[j];
       if (a.is_break || b.is_break) continue;
       if (a.day !== b.day) continue;
+
+      // Replaces the old strict `sameMeeting` check — this one tolerates
+      // the room/time drift that naturally exists between linked pairs
+      // (instructor-side record vs. student-side record of the same class).
+      if (isSameSession(a, b)) continue;
+
       const overlaps = a.start < b.end && b.start < a.end;
       if (!overlaps) continue;
+
       const s = fmtH(Math.max(a.start, b.start));
       const e = fmtH(Math.min(a.end,   b.end));
+
       if (a.room && b.room && a.room === b.room) {
-        const sameSection    = a.section && b.section && a.section === b.section;
-        const sameInstructor = normName(a.instructor) === normName(b.instructor) && a.instructor;
-        if (!sameSection || !sameInstructor)
-          out.push({ type:"Room Conflict", day:a.day, room:a.room, detail:`"${a.room}" is double-booked on ${a.day} ${s}–${e}: ${a.instructor||a.section||"?"} (${a.subject}) vs ${b.instructor||b.section||"?"} (${b.subject})`, blockA:a, blockB:b });
+        out.push({ type:"Room Conflict", day:a.day, room:a.room, detail:`"${a.room}" is double-booked on ${a.day} ${s}–${e}: ${a.instructor||a.section||"?"} (${a.subject}) vs ${b.instructor||b.section||"?"} (${b.subject})`, blockA:a, blockB:b });
       }
       const aInst = normName(a.instructor), bInst = normName(b.instructor);
       if (aInst && bInst && aInst === bInst) {
-        const identical = normName(a.subject)===normName(b.subject) && a.section===b.section && a.room===b.room && a.start===b.start && a.end===b.end;
-        if (!identical) out.push({ type:"Instructor Conflict", day:a.day, room:a.room||"", detail:`${a.instructor} is double-booked on ${a.day} ${s}–${e}: "${a.subject}"${a.section?" ("+a.section+")":""} in ${a.room||"?"} and "${b.subject}"${b.section?" ("+b.section+")":""} in ${b.room||"?"}`, blockA:a, blockB:b });
+        out.push({ type:"Instructor Conflict", day:a.day, room:a.room||"", detail:`${a.instructor} is double-booked on ${a.day} ${s}–${e}: "${a.subject}"${a.section?" ("+a.section+")":""} in ${a.room||"?"} and "${b.subject}"${b.section?" ("+b.section+")":""} in ${b.room||"?"}`, blockA:a, blockB:b });
       }
       if (a.section && b.section && a.section === b.section) {
         if (normName(a.instructor||"") !== normName(b.instructor||""))
@@ -208,7 +271,6 @@ function findSuggestions(conflict, allSchedules, instructorPool = []) {
   });
   return suggestions.slice(0, 5);
 }
-
 function convertGrid(grid, instructor) {
   const out=[];
   DAYS.forEach(day=>{
@@ -217,9 +279,9 @@ function convertGrid(grid, instructor) {
       const cell=grid[day]?.[t]||{};
       const sub=cell.subject||"",room=cell.room||"",rt=cell.roomType||"Lecture",sec=cell.section||"";
       if (!sub) { if(cur){out.push(cur);cur=null;} }
-      else if (!cur) { cur={instructor,subject:sub,day,start:t,end:t+1,room,roomType:rt,section:sec}; }
-      else if (cur.subject===sub&&cur.room===room&&cur.roomType===rt&&cur.section===sec) { cur.end=t+1; }
-      else { out.push(cur); cur={instructor,subject:sub,day,start:t,end:t+1,room,roomType:rt,section:sec}; }
+      else if (!cur) { cur={instructor,subject:sub,day,start:t,end:t+TIME_STEP,room,roomType:rt,section:sec}; }
+      else if (cur.subject===sub&&cur.room===room&&cur.roomType===rt&&cur.section===sec) { cur.end=t+TIME_STEP; }
+      else { out.push(cur); cur={instructor,subject:sub,day,start:t,end:t+TIME_STEP,room,roomType:rt,section:sec}; }
     });
     if(cur) out.push(cur);
   });
@@ -234,20 +296,108 @@ function convertStudentGrid(grid, sectionName) {
       const cell=grid[day]?.[t]||{};
       const sub=cell.subject||"",room=cell.room||"",rt=cell.roomType||"Lecture",inst=cell.instructor||"";
       if (!sub) { if(cur){out.push(cur);cur=null;} }
-      else if (!cur) { cur={section:sectionName,subject:sub,day,start:t,end:t+1,room,roomType:rt,instructor:inst}; }
-      else if (cur.subject===sub&&cur.room===room&&cur.roomType===rt&&normName(cur.instructor)===normName(inst)) { cur.end=t+1; }
-      else { out.push(cur); cur={section:sectionName,subject:sub,day,start:t,end:t+1,room,roomType:rt,instructor:inst}; }
+      else if (!cur) { cur={section:sectionName,subject:sub,day,start:t,end:t+TIME_STEP,room,roomType:rt,instructor:inst}; }
+      else if (cur.subject===sub&&cur.room===room&&cur.roomType===rt&&normName(cur.instructor)===normName(inst)) { cur.end=t+TIME_STEP; }
+      else { out.push(cur); cur={section:sectionName,subject:sub,day,start:t,end:t+TIME_STEP,room,roomType:rt,instructor:inst}; }
     });
     if(cur) out.push(cur);
   });
   return out;
 }
 
+const DURATIONS = [0.5, 1, 1.5, 2, 2.5, 3, 3.5, 4]; // hours, in TIME_STEP increments
+
+function getRunLength(grid, day, t, matchFields) {
+  // Counts how many consecutive slots from `t` share the same subject/room/roomType/section(/instructor)
+  let count = 0;
+  let cur = t;
+  while (cur < DAY_END) {
+    const cell = grid[day]?.[cur];
+    if (!cell || cell.subject !== matchFields.subject) break;
+    const sameRoom    = cell.room === matchFields.room;
+    const sameRT      = cell.roomType === matchFields.roomType;
+    const sameSec     = (cell.section || "") === (matchFields.section || "");
+    const sameInst    = matchFields.instructor === undefined || normName(cell.instructor||"") === normName(matchFields.instructor||"");
+    if (!sameRoom || !sameRT || !sameSec || !sameInst) break;
+    count++;
+    cur = +(cur + TIME_STEP).toFixed(1);
+  }
+  return count;
+}
+
+function isRunStart(grid, day, t, subject) {
+  const prevT = +(t - TIME_STEP).toFixed(1);
+  const prevCell = grid[day]?.[prevT];
+  return !prevCell || prevCell.subject !== subject;
+}
+
+// Writes `duration` hours worth of identical slots starting at `t`.
+// Refuses to overwrite a *different* subject already occupying part of the range.
+function applyBlockDuration(setGrid, day, t, duration, values) {
+  const steps = Math.round(duration / TIME_STEP);
+  let conflict = null;
+  setGrid(prev => {
+    const dayGrid = prev[day] || {};
+    // pre-check for collisions with a different subject
+    for (let i = 0; i < steps; i++) {
+      const ti = +(t + i * TIME_STEP).toFixed(1);
+      if (ti >= DAY_END) { conflict = "Duration extends past the end of the day."; return prev; }
+      const existing = dayGrid[ti];
+      if (existing?.subject && existing.subject !== values.subject) {
+        conflict = `"${existing.subject}" already occupies ${fmtH(ti)}. Clear it first or pick a shorter duration.`;
+        return prev;
+      }
+    }
+    const nextDay = { ...dayGrid };
+    for (let i = 0; i < steps; i++) {
+      const ti = +(t + i * TIME_STEP).toFixed(1);
+      nextDay[ti] = { ...values };
+    }
+    return { ...prev, [day]: nextDay };
+  });
+  return conflict; // null on success, string message on failure
+}
+
+// Clears any slots from t+newDuration up to the end of the previous run
+// (used when the user shrinks a duration on an already-placed block).
+function trimRun(setGrid, day, t, oldSteps, newSteps) {
+  if (newSteps >= oldSteps) return;
+  setGrid(prev => {
+    const dayGrid = { ...(prev[day] || {}) };
+    for (let i = newSteps; i < oldSteps; i++) {
+      const ti = +(t + i * TIME_STEP).toFixed(1);
+      delete dayGrid[ti];
+    }
+    return { ...prev, [day]: dayGrid };
+  });
+}
+
+
+
+
+
 function buildPrintTimeSlots(schedules) {
   const pts = new Set();
   for (let h = DAY_START; h < DAY_END; h++) pts.add(h);
   schedules.forEach(b => { pts.add(Number(b.start)); pts.add(Number(b.end)); });
   return [...pts].filter(t => t >= DAY_START && t < DAY_END).sort((a,b)=>a-b);
+}
+
+// Determines how a merged-cell grid should render a given day/time row.
+// kind "start"   → first row of a block; caller renders one <td rowSpan=...>
+// kind "covered" → row falls inside a block that already started; caller renders NOTHING
+// kind "empty"   → no block; caller renders the normal empty/drop-target cell
+function getCellSpanInfo(cls, day, t, slots) {
+  const covering = cls.find(c => c.day === day && Number(c.start) <= t && Number(c.end) > t);
+  if (!covering) return { kind: "empty" };
+  if (Number(covering.start) === t) {
+    const startIdx = slots.indexOf(t);
+    let endIdx = slots.findIndex(s => s >= Number(covering.end));
+    if (endIdx === -1) endIdx = slots.length;
+    const span = Math.max(1, endIdx - startIdx);
+    return { kind: "start", block: covering, span };
+  }
+  return { kind: "covered" };
 }
 
 function useSubjectCodeMap() {
@@ -349,9 +499,10 @@ function SubjectBlockCard({ block, codeMap, theme, children, style={} }) {
 function ConflictToast({ conflicts, allSchedules, onClose, onMoveSchedule, instructorPool = [] }) {
   useEffect(()=>{ const t=setTimeout(onClose,30000); return()=>clearTimeout(t); },[]);
 
-  const conflictsWithSuggestions = conflicts.map(c => ({
+ // NEW
+const conflictsWithSuggestions = conflicts.map(c => ({
     ...c,
-    suggestions: c.blockA ? findSuggestions(c, allSchedules, instructorPool) : [],
+    suggestions: c.suggestions || (c.blockA ? findSuggestions(c, allSchedules, instructorPool) : []),
   }));
 
   return (
@@ -413,26 +564,29 @@ function ConflictToast({ conflicts, allSchedules, onClose, onMoveSchedule, instr
 }
 
 /* ════════ SCHOOL HEADER ════════ */
+/* ════════ SCHOOL HEADER ════════ */
 function SchoolHeader({ academicYear, semester, compact=false, theme }) {
   return (
-    <div style={{display:"flex",alignItems:"center",gap:compact?12:16,padding:compact?"12px 0 10px":"16px 0 14px",borderBottom:`2px solid ${theme.border}`,marginBottom:compact?12:16}}>
-      <DeptLogo code={theme.code} style={{width:compact?44:52,height:compact?44:52,objectFit:"contain"}} alt={theme.code}/>
-      <div style={{flex:1,textAlign:"center"}}>
-        <div style={{fontSize:compact?15:17,fontWeight:800,color:"#0f172a",letterSpacing:.3}}>PASSI CITY COLLEGE</div>
-        <div style={{fontSize:compact?11:12,fontWeight:700,color:theme.primary,marginTop:2}}>{theme.shortName}</div>
-        <div style={{fontSize:compact?9:10,color:"#64748b",marginTop:1}}>Passi City, Iloilo, Philippines</div>
-        {(academicYear || semester) && (
-          <div style={{display:"flex",gap:6,justifyContent:"center",marginTop:5,flexWrap:"wrap"}}>
-            {academicYear && (
-              <span style={{background:theme.light2,color:theme.text,border:`1px solid ${theme.border}`,borderRadius:20,padding:"2px 10px",fontSize:11,fontWeight:600}}>📅 A.Y. {academicYear}</span>
-            )}
-            {semester && (
-              <span style={{background:"#fefce8",color:"#854d0e",border:"1px solid #fde68a",borderRadius:20,padding:"2px 10px",fontSize:11,fontWeight:600}}>📚 {semester}</span>
-            )}
-          </div>
-        )}
+    <div style={{display:"flex",justifyContent:"center",padding:compact?"12px 0 10px":"16px 0 14px",borderBottom:`2px solid ${theme.border}`,marginBottom:compact?12:16}}>
+      <div style={{display:"flex",alignItems:"center",gap:compact?12:16,maxWidth:520}}>
+        <DeptLogo code={theme.code} style={{width:compact?44:52,height:compact?44:52,objectFit:"contain",flexShrink:0}} alt={theme.code}/>
+        <div style={{textAlign:"center"}}>
+          <div style={{fontSize:compact?15:17,fontWeight:800,color:"#0f172a",letterSpacing:.3}}>PASSI CITY COLLEGE</div>
+          <div style={{fontSize:compact?11:12,fontWeight:700,color:theme.primary,marginTop:2}}>{theme.shortName}</div>
+          <div style={{fontSize:compact?9:10,color:"#64748b",marginTop:1}}>Barangay Bacuranan, Passi City, Iloilo</div>
+          {(academicYear || semester) && (
+            <div style={{display:"flex",gap:6,justifyContent:"center",marginTop:5,flexWrap:"wrap"}}>
+              {academicYear && (
+                <span style={{background:theme.light2,color:theme.text,border:`1px solid ${theme.border}`,borderRadius:20,padding:"2px 10px",fontSize:11,fontWeight:600}}>📅 A.Y. {academicYear}</span>
+              )}
+              {semester && (
+                <span style={{background:"#fefce8",color:"#854d0e",border:"1px solid #fde68a",borderRadius:20,padding:"2px 10px",fontSize:11,fontWeight:600}}>📚 {semester}</span>
+              )}
+            </div>
+          )}
+        </div>
+        <img src={PCCLogo} style={{width:compact?44:52,height:compact?44:52,objectFit:"contain",flexShrink:0}} alt="PCC"/>
       </div>
-      <img src={PCCLogo} style={{width:compact?44:52,height:compact?44:52,objectFit:"contain"}} alt="PCC"/>
     </div>
   );
 }
@@ -447,15 +601,12 @@ function EditModal({ block, onSave, onClose, theme }) {
   const [err,setErr]=useState("");
   const dur=block.end-block.start;
   const inpStyle={padding:"9px 12px",border:`1px solid ${theme.border}`,borderRadius:8,fontSize:14,outline:"none",width:"100%",background:"#fff",color:"#0f172a"};
-  const save=async()=>{
+ const save=async()=>{
     if(startH>=endH) return setErr("Start time must be before end time.");
     if(!room) return setErr("Please select a room.");
     setSaving(true); setErr("");
     try {
-      const res=await fetch(`/api/schedules/${block.id}`,{method:"PUT",credentials:"include",headers:{"Content-Type":"application/json"},body:JSON.stringify({day,start:startH,end:endH,room,roomType:getRoomType(room)})});
-      const data=await res.json();
-      if(data.error){setErr(data.error);setSaving(false);return;}
-      onSave(data);
+      await onSave({ day, start:startH, end:endH, room });
     } catch {setErr("Failed to save.");}
     setSaving(false);
   };
@@ -536,7 +687,7 @@ function WeeklyGrid({ grid, setGrid, theme }) {
         </tr></thead>
         <tbody>{TIMES.map(t=>(
           <tr key={t}>
-            <td style={{padding:"4px 6px",border:`1px solid ${theme.light2}`,whiteSpace:"nowrap",fontWeight:600,fontSize:11,color:theme.primary,paddingRight:10,background:theme.light}}>{fmtRange(t,t+1)}</td>
+            <td style={{padding:"4px 6px",border:`1px solid ${theme.light2}`,whiteSpace:"nowrap",fontWeight:600,fontSize:11,color:theme.primary,paddingRight:10,background:theme.light}}>{fmtRange(t,t+TIME_STEP)}</td>
             {DAYS.map(day=>{
               const cell=grid[day]?.[t]||{};
               const sub=cell.subject||"",room=cell.room||"",rt=cell.roomType||"Lecture",sec=cell.section||"";
@@ -550,7 +701,30 @@ function WeeklyGrid({ grid, setGrid, theme }) {
                     <optgroup label="Lecture Rooms">{LECTURE_ROOMS.map(r=><option key={r} value={r}>{r}</option>)}</optgroup>
                     <optgroup label="Laboratories">{LAB_ROOMS.map(r=><option key={r} value={r}>{r}</option>)}</optgroup>
                   </select>
-                  {sub&&room&&<div style={{fontSize:10,fontWeight:700,color:lab?theme.text:"#166534",background:lab?theme.light2:"#dcfce7",border:`1px solid ${lab?theme.border:"#86efac"}`,borderRadius:20,padding:"2px 7px",display:"inline-block",marginTop:2}}>{lab?"🔬":"📖"} {rt}</div>}
+                 {sub&&room&&<div style={{fontSize:10,fontWeight:700,color:lab?theme.text:"#166534",background:lab?theme.light2:"#dcfce7",border:`1px solid ${lab?theme.border:"#86efac"}`,borderRadius:20,padding:"2px 7px",display:"inline-block",marginTop:2}}>{lab?"🔬":"📖"} {rt}</div>}
+{sub && room && isRunStart(grid, day, t, sub) && (() => {
+  const runLen = getRunLength(grid, day, t, { subject: sub, room, roomType: rt, section: sec });
+  const curDuration = +(runLen * TIME_STEP).toFixed(1);
+  return (
+    <select
+      style={{width:"100%",marginTop:4,padding:"3px 6px",border:`1px solid ${theme.border}`,borderRadius:4,fontSize:10,fontWeight:600,color:theme.primary,background:"#fff",boxSizing:"border-box"}}
+      value={curDuration}
+      onChange={e => {
+        const newDuration = Number(e.target.value);
+        const oldSteps = runLen;
+        const newSteps = Math.round(newDuration / TIME_STEP);
+        if (newSteps < oldSteps) {
+          trimRun(setGrid, day, t, oldSteps, newSteps);
+        } else if (newSteps > oldSteps) {
+          const err = applyBlockDuration(setGrid, day, t, newDuration, { subject: sub, room, roomType: rt, section: sec });
+          if (err) alert(err);
+        }
+      }}
+    >
+      {DURATIONS.map(d => <option key={d} value={d}>{d}h</option>)}
+    </select>
+  );
+})()}
                 </td>
               );
             })}
@@ -619,9 +793,9 @@ function StudentWeeklyGrid({ grid, setGrid, theme, activeSemester }) {
           <th style={{padding:"9px 10px",background:theme.primary,border:`1px solid ${theme.primary3}`,textAlign:"left",fontWeight:600,color:"#fff",whiteSpace:"nowrap"}}>Time</th>
           {DAYS.map(d=><th key={d} style={{padding:"9px 10px",background:theme.primary,border:`1px solid ${theme.primary3}`,textAlign:"left",fontWeight:600,color:"#fff",minWidth:200}}>{d}</th>)}
         </tr></thead>
-        <tbody>{TIMES.map(t=>(
+       <tbody>{TIMES.map(t=>(
           <tr key={t}>
-            <td style={{padding:"4px 6px",border:`1px solid ${theme.light2}`,whiteSpace:"nowrap",fontWeight:600,fontSize:11,color:theme.primary,background:theme.light}}>{fmtRange(t,t+1)}</td>
+            <td style={{padding:"4px 6px",border:`1px solid ${theme.light2}`,whiteSpace:"nowrap",fontWeight:600,fontSize:11,color:theme.primary,background:theme.light}}>{fmtRange(t,t+TIME_STEP)}</td>
             {DAYS.map(day=>{
               const cell = grid[day]?.[t] || {};
               const sub  = cell.subject || "", room = cell.room || "", rt = cell.roomType || "Lecture", inst = cell.instructor || "";
@@ -659,7 +833,31 @@ function StudentWeeklyGrid({ grid, setGrid, theme, activeSemester }) {
                     <optgroup label="Lecture Rooms">{LECTURE_ROOMS.map(r=><option key={r} value={r}>{r}</option>)}</optgroup>
                     <optgroup label="Laboratories">{LAB_ROOMS.map(r=><option key={r} value={r}>{r}</option>)}</optgroup>
                   </select>
-                  {sub&&room&&<div style={{fontSize:10,fontWeight:700,color:lab?theme.text:"#166534",background:lab?theme.light2:"#dcfce7",border:`1px solid ${lab?theme.border:"#86efac"}`,borderRadius:20,padding:"2px 7px",display:"inline-block",marginTop:2}}>{lab?"🔬":"📖"} {rt}</div>}
+                 {sub&&room&&<div style={{fontSize:10,fontWeight:700,color:lab?theme.text:"#166534",background:lab?theme.light2:"#dcfce7",border:`1px solid ${lab?theme.border:"#86efac"}`,borderRadius:20,padding:"2px 7px",display:"inline-block",marginTop:2}}>{lab?"🔬":"📖"} {rt}</div>}
+{sub && room && isRunStart(grid, day, t, sub) && (() => {
+  const matchFields = { subject: sub, room, roomType: rt, section: "", instructor: inst };
+  const runLen = getRunLength(grid, day, t, matchFields);
+  const curDuration = +(runLen * TIME_STEP).toFixed(1);
+  return (
+    <select
+      style={{width:"100%",marginTop:4,padding:"3px 6px",border:`1px solid ${theme.border}`,borderRadius:4,fontSize:10,fontWeight:600,color:theme.primary,background:"#fff",boxSizing:"border-box"}}
+      value={curDuration}
+      onChange={e => {
+        const newDuration = Number(e.target.value);
+        const oldSteps = runLen;
+        const newSteps = Math.round(newDuration / TIME_STEP);
+        if (newSteps < oldSteps) {
+          trimRun(setGrid, day, t, oldSteps, newSteps);
+        } else if (newSteps > oldSteps) {
+          const err = applyBlockDuration(setGrid, day, t, newDuration, { subject: sub, room, roomType: rt, instructor: inst });
+          if (err) alert(err);
+        }
+      }}
+    >
+      {DURATIONS.map(d => <option key={d} value={d}>{d}h</option>)}
+    </select>
+  );
+})()}
                 </td>
               );
             })}
@@ -680,7 +878,7 @@ function PrintModal({ schedules, academicYear, semester, onClose, theme, codeMap
   const handlePrint=async()=>{
     setPrinting(true);
     const win=window.open("","_blank");
-    win.document.write(`<!DOCTYPE html><html><head><title>Faculty Class Schedule</title><style>*{box-sizing:border-box;margin:0;padding:0;}body{font-family:Arial,sans-serif;font-size:10pt;color:#000;background:#fff;}.page{padding:14mm 14mm 14mm 18mm;}table{width:100%;border-collapse:collapse;}th{background:${theme.primary};color:#fff;font-weight:bold;padding:6px 4px;text-align:center;border:1px solid ${theme.primary3};font-size:8pt;}td{border:1px solid #ddd;padding:4px;text-align:center;vertical-align:middle;height:36px;}.td-lab{background:${theme.light2};}.td-lec{background:${theme.light};}.td-break{background:#fef9c3;}.time-td{background:${theme.light};color:${theme.primary};font-weight:700;font-size:7.5pt;white-space:nowrap;}@media print{@page{margin:0;size:A4 landscape;}body{-webkit-print-color-adjust:exact;print-color-adjust:exact;}.page{padding:8mm;}}</style></head><body><div class="page">${ref.current.innerHTML}</div></body></html>`);
+ win.document.write(`<!DOCTYPE html><html><head><title>Faculty Class Schedule</title><style>*{box-sizing:border-box;margin:0;padding:0;}body{font-family:Arial,sans-serif;font-size:10pt;color:#000;background:#fff;}.page{width:297mm;padding:14mm 14mm 14mm 18mm;margin:0 auto;}table{width:100%;border-collapse:collapse;table-layout:fixed;}th:first-child,td:first-child{width:80px;}th{background:${theme.primary};color:#fff;font-weight:bold;padding:6px 4px;text-align:center;border:1px solid ${theme.primary3};font-size:8pt;}td{border:1px solid #ddd;padding:4px;text-align:center;vertical-align:middle;height:36px;}.td-lab{background:${theme.light2};}.td-lec{background:${theme.light};}.td-break{background:#fef9c3;}.time-td{background:${theme.light};color:${theme.primary};font-weight:700;font-size:7.5pt;white-space:nowrap;}tr,div[style*="page-break"]{page-break-inside:avoid;}thead{display:table-header-group;}@media print{@page{margin:10mm;size:A4 landscape;}body{-webkit-print-color-adjust:exact;print-color-adjust:exact;}}</style></head><body><div class="page">${ref.current.innerHTML}</div></body></html>`);
     win.document.close(); win.focus();
     setTimeout(()=>{win.print();win.close();setPrinting(false);},700);
   };
@@ -695,15 +893,17 @@ function PrintModal({ schedules, academicYear, semester, onClose, theme, codeMap
             <button style={{padding:"10px 18px",background:theme.light,color:theme.text,border:`1px solid ${theme.border}`,borderRadius:8,cursor:"pointer",fontSize:14}} onClick={onClose}>✕ Close</button>
           </div>
         </div>
-        <div ref={ref} style={{fontFamily:"Arial,sans-serif",fontSize:10,color:"#000",background:"#fff",border:`1px solid ${theme.border}`,borderRadius:8,padding:"22px 26px"}}>
-          <div style={{display:"flex",alignItems:"center",justifyContent:"center",gap:14,paddingBottom:10,marginBottom:8,borderBottom:"3px double #000"}}>
-            <DeptLogo code={theme.code} style={{width:56,height:56,objectFit:"contain"}} alt={theme.code}/>
-            <div style={{textAlign:"center"}}>
-              <div style={{fontSize:15,fontWeight:900,textTransform:"uppercase"}}>Passi City College</div>
-              <div style={{fontSize:10.5,fontWeight:700,color:theme.primary,marginTop:3}}>{theme.shortName}</div>
-              <div style={{fontSize:8.5,color:"#555",marginTop:2}}>Passi City, Iloilo, Philippines</div>
+       <div ref={ref} style={{fontFamily:"Arial,sans-serif",fontSize:10,color:"#000",background:"#fff",border:`1px solid ${theme.border}`,borderRadius:8,padding:"22px 26px"}}>
+          <div style={{display:"flex",justifyContent:"center",paddingBottom:10,marginBottom:8,borderBottom:"3px double #000"}}>
+            <div style={{display:"flex",alignItems:"center",gap:14,maxWidth:480}}>
+              <DeptLogo code={theme.code} style={{width:56,height:56,objectFit:"contain",flexShrink:0}} alt={theme.code}/>
+              <div style={{textAlign:"center"}}>
+                <div style={{fontSize:15,fontWeight:900,textTransform:"uppercase"}}>Passi City College</div>
+                <div style={{fontSize:10.5,fontWeight:700,color:theme.primary,marginTop:3}}>{theme.shortName}</div>
+                <div style={{fontSize:8.5,color:"#555",marginTop:2}}>Barangay Bacuranan, Passi City, Iloilo</div>
+              </div>
+              <img src={PCCLogo} style={{width:56,height:56,objectFit:"contain",flexShrink:0}} alt="PCC"/>
             </div>
-            <img src={PCCLogo} style={{width:56,height:56,objectFit:"contain"}} alt="PCC"/>
           </div>
           <div style={{textAlign:"center",fontSize:13,fontWeight:"bold",textTransform:"uppercase",letterSpacing:1.5,margin:"10px 0 3px"}}>Faculty Class Schedule</div>
           {(academicYear || semester) && (
@@ -792,10 +992,10 @@ function StudentPrintModal({ schedules, section, academicYear, semester, onClose
   const lecH=real.filter(c=>c.roomType==="Lecture").reduce((s,c)=>s+(c.end-c.start),0);
   const timeSlots = buildPrintTimeSlots(schedules);
 
-  const handlePrint=async()=>{
+ const handlePrint=async()=>{
     setPrinting(true);
     const win=window.open("","_blank");
-    win.document.write(`<!DOCTYPE html><html><head><title>Student Schedule - ${section}</title><style>*{box-sizing:border-box;margin:0;padding:0;}body{font-family:Arial,sans-serif;font-size:10pt;color:#000;}.page{padding:14mm;}table{width:100%;border-collapse:collapse;}th{background:${theme.primary};color:#fff;font-weight:bold;padding:6px 4px;text-align:center;border:1px solid ${theme.primary3};font-size:8pt;}td{border:1px solid #ddd;padding:4px;text-align:center;vertical-align:middle;height:40px;}@media print{@page{margin:0;size:A4 landscape;}body{-webkit-print-color-adjust:exact;print-color-adjust:exact;}}</style></head><body><div class="page">${ref.current.innerHTML}</div></body></html>`);
+win.document.write(`<!DOCTYPE html><html><head><title>Student Schedule - ${section}</title><style>*{box-sizing:border-box;margin:0;padding:0;}body{font-family:Arial,sans-serif;font-size:10pt;color:#000;}.page{width:297mm;padding:14mm;margin:0 auto;}table{width:100%;border-collapse:collapse;table-layout:fixed;}th:first-child,td:first-child{width:80px;}th{background:${theme.primary};color:#fff;font-weight:bold;padding:6px 4px;text-align:center;border:1px solid ${theme.primary3};font-size:8pt;}td{border:1px solid #ddd;padding:4px;text-align:center;vertical-align:middle;height:40px;}tr{page-break-inside:avoid;}thead{display:table-header-group;}@media print{@page{margin:10mm;size:A4 landscape;}body{-webkit-print-color-adjust:exact;print-color-adjust:exact;}}</style></head><body><div class="page">${ref.current.innerHTML}</div></body></html>`);
     win.document.close(); win.focus();
     setTimeout(()=>{win.print();win.close();setPrinting(false);},700);
   };
@@ -810,15 +1010,17 @@ function StudentPrintModal({ schedules, section, academicYear, semester, onClose
             <button style={{padding:"10px 18px",background:theme.light,color:theme.text,border:`1px solid ${theme.border}`,borderRadius:8,cursor:"pointer",fontSize:14}} onClick={onClose}>✕ Close</button>
           </div>
         </div>
-        <div ref={ref} style={{fontFamily:"Arial,sans-serif",fontSize:10,color:"#000",background:"#fff",border:`1px solid ${theme.border}`,borderRadius:8,padding:"22px 26px"}}>
-          <div style={{display:"flex",alignItems:"center",justifyContent:"center",gap:14,paddingBottom:10,marginBottom:8,borderBottom:"3px double #000"}}>
-            <DeptLogo code={theme.code} style={{width:56,height:56,objectFit:"contain"}} alt={theme.code}/>
-            <div style={{textAlign:"center"}}>
-              <div style={{fontSize:15,fontWeight:900,textTransform:"uppercase"}}>Passi City College</div>
-              <div style={{fontSize:10.5,fontWeight:700,color:theme.primary,marginTop:3}}>{theme.shortName}</div>
-              <div style={{fontSize:8.5,color:"#555",marginTop:2}}>Passi City, Iloilo, Philippines</div>
+   <div ref={ref} style={{fontFamily:"Arial,sans-serif",fontSize:10,color:"#000",background:"#fff",border:`1px solid ${theme.border}`,borderRadius:8,padding:"22px 26px"}}>
+          <div style={{display:"flex",justifyContent:"center",paddingBottom:10,marginBottom:8,borderBottom:"3px double #000"}}>
+            <div style={{display:"flex",alignItems:"center",gap:14,maxWidth:480}}>
+              <DeptLogo code={theme.code} style={{width:56,height:56,objectFit:"contain",flexShrink:0}} alt={theme.code}/>
+              <div style={{textAlign:"center"}}>
+                <div style={{fontSize:15,fontWeight:900,textTransform:"uppercase"}}>Passi City College</div>
+                <div style={{fontSize:10.5,fontWeight:700,color:theme.primary,marginTop:3}}>{theme.shortName}</div>
+                <div style={{fontSize:8.5,color:"#555",marginTop:2}}>Barangay Bacuranan, Passi City, Iloilo</div>
+              </div>
+              <img src={PCCLogo} style={{width:56,height:56,objectFit:"contain",flexShrink:0}} alt="PCC"/>
             </div>
-            <img src={PCCLogo} style={{width:56,height:56,objectFit:"contain"}} alt="PCC"/>
           </div>
           <div style={{textAlign:"center",fontSize:13,fontWeight:"bold",textTransform:"uppercase",letterSpacing:1.5,margin:"10px 0 3px"}}>Class Schedule</div>
           <div style={{textAlign:"center",fontSize:11,fontWeight:700,color:theme.primary,marginBottom:3}}>{section}</div>
@@ -905,8 +1107,8 @@ function RoomPrintModal({ room, blocks, academicYear, semester, onClose, theme, 
 
   const handlePrint = () => {
     setPrinting(true);
-    const win = window.open("", "_blank");
-    win.document.write(`<!DOCTYPE html><html><head><title>Room Schedule - ${room}</title><style>*{box-sizing:border-box;margin:0;padding:0;}body{font-family:Arial,sans-serif;font-size:10pt;color:#000;}.page{padding:14mm;}table{width:100%;border-collapse:collapse;}th{background:${theme.primary};color:#fff;font-weight:bold;padding:6px 4px;text-align:center;border:1px solid ${theme.primary3};font-size:8pt;}td{border:1px solid #ddd;padding:4px;text-align:center;vertical-align:middle;height:40px;}@media print{@page{margin:0;size:A4 landscape;}body{-webkit-print-color-adjust:exact;print-color-adjust:exact;}}</style></head><body><div class="page">${ref.current.innerHTML}</div></body></html>`);
+   const win = window.open("", "_blank");
+   win.document.write(`<!DOCTYPE html><html><head><title>Room Schedule - ${room}</title><style>*{box-sizing:border-box;margin:0;padding:0;}body{font-family:Arial,sans-serif;font-size:10pt;color:#000;}.page{width:297mm;padding:14mm;margin:0 auto;}table{width:100%;border-collapse:collapse;table-layout:fixed;}th:first-child,td:first-child{width:80px;}th{background:${theme.primary};color:#fff;font-weight:bold;padding:6px 4px;text-align:center;border:1px solid ${theme.primary3};font-size:8pt;}td{border:1px solid #ddd;padding:4px;text-align:center;vertical-align:middle;height:40px;}tr{page-break-inside:avoid;}thead{display:table-header-group;}@media print{@page{margin:10mm;size:A4 landscape;}body{-webkit-print-color-adjust:exact;print-color-adjust:exact;}}</style></head><body><div class="page">${ref.current.innerHTML}</div></body></html>`);
     win.document.close(); win.focus();
     setTimeout(() => { win.print(); win.close(); setPrinting(false); }, 700);
   };
@@ -925,14 +1127,16 @@ function RoomPrintModal({ room, blocks, academicYear, semester, onClose, theme, 
           </div>
         </div>
         <div ref={ref} style={{fontFamily:"Arial,sans-serif",fontSize:10,color:"#000",background:"#fff",border:`1px solid ${theme.border}`,borderRadius:8,padding:"22px 26px"}}>
-          <div style={{display:"flex",alignItems:"center",justifyContent:"center",gap:14,paddingBottom:10,marginBottom:8,borderBottom:"3px double #000"}}>
-            <DeptLogo code={theme.code} style={{width:56,height:56,objectFit:"contain"}} alt={theme.code}/>
-            <div style={{textAlign:"center"}}>
-              <div style={{fontSize:15,fontWeight:900,textTransform:"uppercase"}}>Passi City College</div>
-              <div style={{fontSize:10.5,fontWeight:700,color:theme.primary,marginTop:3}}>{theme.shortName}</div>
-              <div style={{fontSize:8.5,color:"#555",marginTop:2}}>Passi City, Iloilo, Philippines</div>
+          <div style={{display:"flex",justifyContent:"center",paddingBottom:10,marginBottom:8,borderBottom:"3px double #000"}}>
+            <div style={{display:"flex",alignItems:"center",gap:14,maxWidth:480}}>
+              <DeptLogo code={theme.code} style={{width:56,height:56,objectFit:"contain",flexShrink:0}} alt={theme.code}/>
+              <div style={{textAlign:"center"}}>
+                <div style={{fontSize:15,fontWeight:900,textTransform:"uppercase"}}>Passi City College</div>
+                <div style={{fontSize:10.5,fontWeight:700,color:theme.primary,marginTop:3}}>{theme.shortName}</div>
+                <div style={{fontSize:8.5,color:"#555",marginTop:2}}>Barangay Bacuranan, Passi City, Iloilo</div>
+              </div>
+              <img src={PCCLogo} style={{width:56,height:56,objectFit:"contain",flexShrink:0}} alt="PCC"/>
             </div>
-            <img src={PCCLogo} style={{width:56,height:56,objectFit:"contain"}} alt="PCC"/>
           </div>
           <div style={{textAlign:"center",fontSize:13,fontWeight:"bold",textTransform:"uppercase",letterSpacing:1.5,margin:"10px 0 3px"}}>Room Schedule</div>
           <div style={{textAlign:"center",fontSize:11,fontWeight:700,color:theme.primary,marginBottom:3}}>{room} — {isLab?"Laboratory":"Lecture Room"}</div>
@@ -2034,55 +2238,129 @@ function Sidebar({ activePage, setActivePage, theme, previewDept, setPreviewDept
 
 /* ════════ PAGE CONTENT ════════ */
 /* ════════ DRAG-DROP INLINE SCHEDULE GRID — FACULTY ════════ */
-function InlineScheduleGrid({ schedules, allSchedules, academicYear, semester, onMoveBlock, theme, codeMap, instructorPool = [] }) {
+function InlineScheduleGrid({ schedules, allSchedules, academicYear, semester, onMoveBlock, onCheckMove, theme, codeMap, instructorPool = [] }) {
   const [dragBlock, setDragBlock] = useState(null);
-  const [dragOver, setDragOver]   = useState(null); // {day, time}
+  const [dragOver, setDragOver]   = useState(null);
   const [toast, setToast]         = useState(null);
+  const [editingBlock, setEditingBlock] = useState(null);
+  const [collapsed, setCollapsed] = useState({});
 
   const real = schedules.filter(s => !s.is_break);
   const instructors = [...new Set(real.filter(s => s.instructor?.trim()).map(s => s.instructor))].sort();
 
-  const handlePrint = () => {
-    const win = window.open("", "_blank");
-    const content = document.getElementById("inline-faculty-print-area")?.innerHTML || "";
-    win.document.write(`<!DOCTYPE html><html><head><title>Faculty Class Schedule</title><style>*{box-sizing:border-box;margin:0;padding:0;}body{font-family:Arial,sans-serif;font-size:10pt;color:#000;background:#fff;}.page{padding:14mm;}table{width:100%;border-collapse:collapse;}th{background:${theme.primary};color:#fff;font-weight:bold;padding:6px 4px;text-align:center;border:1px solid ${theme.primary3||theme.primary};font-size:8pt;}td{border:1px solid #ddd;padding:4px;text-align:center;vertical-align:middle;height:36px;}@media print{@page{margin:0;size:A4 landscape;}body{-webkit-print-color-adjust:exact;print-color-adjust:exact;}.page{padding:8mm;}}</style></head><body><div class="page">${content}</div></body></html>`);
-    win.document.close(); win.focus();
-    setTimeout(() => { win.print(); win.close(); }, 700);
-  };
+  // ── MODIFIED: default every instructor to collapsed (moved AFTER `instructors` is declared) ──
+  useEffect(() => {
+    setCollapsed(prev => {
+      const next = { ...prev };
+      let changed = false;
+      instructors.forEach(inst => { if (!(inst in next)) { next[inst] = true; changed = true; } });
+      return changed ? next : prev;
+    });
+  }, [instructors.join("|")]);
+
+
+
+
+const handlePrint = () => {
+  const win = window.open("", "_blank");
+  const pages = instructors
+    .map(inst => document.getElementById(`inline-faculty-print-${inst}`)?.innerHTML || "")
+    .filter(Boolean);
+
+  const pagesHtml = pages
+    .map((html, i) => `
+      <div class="print-page" id="printPage${i}">
+        <div class="print-inner" id="printInner${i}">${html}</div>
+      </div>
+    `).join("");
+
+  win.document.write(`<!DOCTYPE html><html><head><title>Faculty Class Schedule</title><style>
+*{box-sizing:border-box;margin:0;padding:0;}
+body{font-family:Arial,sans-serif;font-size:10pt;color:#000;background:#fff;}
+.print-page{
+  width:281mm;
+  height:194mm;      /* A4 landscape minus margins */
+  overflow:hidden;
+  position:relative;
+  page-break-after:always;
+}
+.print-page:last-child{page-break-after:auto;}
+.print-inner{ transform-origin: top left; }
+table{width:100%;border-collapse:collapse;table-layout:fixed;}
+th:first-child,td:first-child{width:80px;}
+th{background:${theme.primary};color:#fff;font-weight:bold;padding:6px 4px;text-align:center;border:1px solid ${theme.primary3||theme.primary};font-size:8pt;}
+td{border:1px solid #ddd;padding:4px;text-align:center;vertical-align:middle;height:36px;}
+thead{display:table-header-group;}
+@media print{@page{margin:8mm;size:A4 landscape;}body{-webkit-print-color-adjust:exact;print-color-adjust:exact;}}
+</style></head><body>
+${pagesHtml}
+<script>
+  function fitAll() {
+    var pages = document.querySelectorAll('.print-page');
+    pages.forEach(function(outer, i) {
+      var inner = document.getElementById('printInner' + i);
+      var availH = outer.clientHeight;
+      var naturalH = inner.scrollHeight;
+      if (naturalH > availH) {
+        var scale = (availH / naturalH) * 0.98;
+        inner.style.transform = 'scale(' + scale + ')';
+        inner.style.width = (100 / scale) + '%';
+      }
+    });
+    setTimeout(function () { window.print(); window.close(); }, 150);
+  }
+  var imgs = Array.prototype.slice.call(document.images);
+  var pending = imgs.filter(function (img) { return !img.complete; }).length;
+  if (pending === 0) {
+    fitAll();
+  } else {
+    var done = 0;
+    imgs.forEach(function (img) {
+      img.addEventListener('load', check);
+      img.addEventListener('error', check);
+    });
+    function check() { done++; if (done >= pending) fitAll(); }
+    setTimeout(fitAll, 2000);
+  }
+</script>
+</body></html>`);
+  win.document.close(); win.focus();
+};
 
   const handleDragStart = (e, block) => {
     setDragBlock(block);
     e.dataTransfer.effectAllowed = "move";
   };
 
-  const handleDrop = async (e, day, time, instructor) => {
+const handleDrop = async (e, day, time, instructor) => {
     e.preventDefault();
     if (!dragBlock) return;
+    if (normName(dragBlock.instructor) !== normName(instructor)) { setDragOver(null); setDragBlock(null); return; }
     setDragOver(null);
     const dur = dragBlock.end - dragBlock.start;
     const newStart = time;
     const newEnd   = time + dur;
+    if (!(newStart < newEnd)) { setDragBlock(null); return; }
     if (newStart === dragBlock.start && day === dragBlock.day) { setDragBlock(null); return; }
 
-    // Build combined schedules excluding the block being moved
-    const others = allSchedules.filter(s => !s.is_break && s.id !== dragBlock.id);
-    const moved  = { ...dragBlock, day, start: newStart, end: newEnd };
-    const conflicts = detectConflicts([...others, moved]);
-    const relevant  = conflicts.filter(c => c.blockA?.id === dragBlock.id || c.blockB?.id === dragBlock.id);
+    // Link-aware conflict check: this excludes the dragged block's linked
+    // twin (instructor/student pair) from the comparison, so a class can
+    // never be flagged as conflicting with itself.
+  const target = { day, start: newStart, end: newEnd, room: dragBlock.room };
+    const { conflicts, moved, others } = onCheckMove(dragBlock, target);
 
-    if (relevant.length > 0) {
-      // Attach suggestions
-      const withSugg = relevant.map(c => ({
+    if (conflicts.length > 0) {
+      const withSugg = conflicts.map(c => ({
         ...c,
-        suggestions: findSuggestions(c, others, instructorPool),
+        suggestions: findSuggestions(c, others || allSchedules, instructorPool),
       }));
-      setToast({ conflicts: withSugg, movedBlock: moved, others });
+      setToast({ conflicts: withSugg, movedBlock: moved });
       setDragBlock(null);
       return;
     }
 
     // No conflicts — save
-    await onMoveBlock(dragBlock, { day, start: newStart, end: newEnd, room: dragBlock.room });
+    await onMoveBlock(dragBlock, target);
     setDragBlock(null);
   };
 
@@ -2095,13 +2373,35 @@ function InlineScheduleGrid({ schedules, allSchedules, academicYear, semester, o
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 0 }}>
       {/* Toast */}
-      {toast && (
+     {toast && (
         <ConflictToast
           conflicts={toast.conflicts}
           allSchedules={allSchedules}
           onClose={() => setToast(null)}
-          onMoveSchedule={null}
+       onMoveSchedule={async (block, sg) => {
+  const target = toast?.movedBlock || block;
+  const targetRoom  = sg.room || target.room;
+  const targetStart = Number(sg.start);
+  const targetEnd   = Number(sg.end);
+  if (!targetRoom || targetStart === undefined || targetEnd === undefined || targetStart >= targetEnd) return;
+  const payload = { day: sg.day, start: targetStart, end: targetEnd, room: targetRoom };
+  if (sg.instructor) payload.instructor = sg.instructor;
+  await onMoveBlock(target, payload);
+  setToast(null);
+}}
           instructorPool={instructorPool}
+        />
+      )}
+
+      {editingBlock && (
+        <EditModal
+          block={editingBlock}
+          theme={theme}
+          onClose={() => setEditingBlock(null)}
+          onSave={async (updated) => {
+            await onMoveBlock(editingBlock, { day: updated.day, start: updated.start, end: updated.end, room: updated.room });
+            setEditingBlock(null);
+          }}
         />
       )}
 
@@ -2146,17 +2446,150 @@ function InlineScheduleGrid({ schedules, allSchedules, academicYear, semester, o
           return (
             <div key={inst} style={{ marginBottom: 28, border: `1px solid ${theme.border}`, borderRadius: 10, overflow: "hidden" }}>
               {/* Instructor header */}
-              <div style={{ background: theme.primary, color: "#fff", padding: "9px 16px", display: "flex", alignItems: "center", gap: 14, flexWrap: "wrap" }}>
-                <span style={{ fontWeight: 700, fontSize: 14 }}>👨‍🏫 {inst}</span>
-                <span style={{ fontSize: 11, opacity: 0.8 }}>⏱ {total} hrs total</span>
-                <span style={{ fontSize: 11, opacity: 0.8 }}>📖 Lecture: {lecH}h</span>
-                <span style={{ fontSize: 11, opacity: 0.8 }}>🔬 Lab: {labH}h</span>
-                <span style={{ marginLeft: "auto", fontSize: 10, opacity: 0.6, fontStyle: "italic" }}>Drag blocks to reschedule</span>
-              </div>
+            <div
+  style={{ background: theme.primary, color: "#fff", padding: "9px 16px", display: "flex", alignItems: "center", gap: 14, flexWrap: "wrap", cursor: "pointer", userSelect: "none" }}
+  onClick={() => setCollapsed(prev => ({ ...prev, [inst]: !prev[inst] }))}
+>
+  <span style={{ fontWeight: 700, fontSize: 14 }}>👨‍🏫 {inst}</span>
+  <span style={{ fontSize: 11, opacity: 0.8 }}>⏱ {total} hrs total</span>
+  <span style={{ fontSize: 11, opacity: 0.8 }}>📖 Lecture: {lecH}h</span>
+  <span style={{ fontSize: 11, opacity: 0.8 }}>🔬 Lab: {labH}h</span>
+<span style={{ marginLeft: "auto", fontSize: 12, opacity: 0.85 }}>{collapsed[inst] ? "▶ Show" : "▼ Hide"}</span>
+</div>
 
-              {/* Grid table */}
+{/* Hidden printable version — always mounted, independent of collapsed state */}
+{/* Hidden printable version — always mounted, independent of collapsed state */}
+<div id={`inline-faculty-print-${inst}`} style={{ display: "none" }}>
+  <div className="instructor-block">
+    <div style={{ display: "flex", justifyContent: "center", paddingBottom: 8, marginBottom: 8, borderBottom: "3px double #000" }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 12, maxWidth: 460 }}>
+        <DeptLogo code={theme.code} style={{ width: 48, height: 48, objectFit: "contain", flexShrink: 0 }} alt={theme.code}/>
+        <div style={{ textAlign: "center" }}>
+          <div style={{ fontSize: 14, fontWeight: 900, textTransform: "uppercase" }}>Passi City College</div>
+          <div style={{ fontSize: 10, fontWeight: 700, color: theme.primary, marginTop: 2 }}>{theme.shortName}</div>
+          <div style={{ fontSize: 8, color: "#555", marginTop: 1 }}>Barangay Bacuranan, Passi City, Iloilo</div>
+        </div>
+        <img src={PCCLogo} style={{ width: 48, height: 48, objectFit: "contain", flexShrink: 0 }} alt="PCC"/>
+      </div>
+    </div>
+    <div style={{ textAlign: "center", fontWeight: "bold", fontSize: 13, textTransform: "uppercase", margin: "8px 0 4px" }}>Faculty Class Schedule — {inst}</div>
+    {academicYear && semester && <div style={{ textAlign: "center", fontSize: 10, color: theme.primary, marginBottom: 6 }}>A.Y. {academicYear} · {semester}</div>}
+    <div style={{ background: theme.primary, color: theme.light, fontSize: 8, padding: "4px 14px", marginBottom: 8, display: "flex", gap: 16, flexWrap: "wrap", borderRadius: 4 }}>
+      <span>⏱ Total: <strong style={{ color: "#fff" }}>{total} hrs</strong></span>
+      <span>📖 Lecture: <strong style={{ color: "#fff" }}>{lecH} hrs</strong></span>
+      <span>🔬 Lab: <strong style={{ color: "#fff" }}>{labH} hrs</strong></span>
+    </div>
+    <table style={{ width: "100%", borderCollapse: "collapse", tableLayout: "fixed", fontSize: 8 }}>
+      <thead><tr>
+        <th style={{ background: theme.primary3 || theme.primary, color: "#fff", border: `1px solid ${theme.primary}`, padding: "6px 4px", width: 80 }}>Time</th>
+        {DAYS.map(d => <th key={d} style={{ background: theme.primary, color: "#fff", border: `1px solid ${theme.primary3 || theme.primary}`, padding: "6px 4px" }}>{d}</th>)}
+      </tr></thead>
+      <tbody>
+        {instSlots.map(t => {
+          if (t === LUNCH_START) return (
+            <tr key="lunch">
+              <td style={{ background: "#fef9c3", border: "1px solid #ddd", padding: "3px 4px", fontWeight: 700, fontSize: 7.5, textAlign: "center", color: "#854d0e", height: 28 }}>{fmtRange(LUNCH_START, LUNCH_END)}</td>
+              {DAYS.map(day => <td key={day} style={{ border: "1px solid #ddd", textAlign: "center", height: 28, background: "#fef9c3" }}><span style={{ fontSize: 8, color: "#854d0e", fontWeight: 700 }}>🍽 Lunch</span></td>)}
+            </tr>
+          );
+          if (t > LUNCH_START && t < LUNCH_END) return null;
+          const nextT = instSlots[instSlots.indexOf(t) + 1] ?? (t + 1);
+          return (
+            <tr key={t}>
+              <td style={{ background: theme.light, border: "1px solid #ddd", padding: "3px 4px", fontWeight: 700, fontSize: 7.5, textAlign: "center", color: theme.primary, height: 36, whiteSpace: "nowrap" }}>{fmtRange(t, nextT)}</td>
+            {DAYS.map(day => {
+                            const info = getCellSpanInfo(cls, day, t, instSlots);
+                            if (info.kind === "covered") return null;
+
+                            const isDragTarget = dragOver?.day === day && dragOver?.time === t;
+
+                            if (info.kind === "empty") return (
+                              <td
+                                key={day}
+                                style={{
+                                  border: `2px solid ${isDragTarget ? theme.primary : "#ddd"}`,
+                                  height: 44,
+                                  background: isDragTarget ? theme.light2 : "#fff",
+                                  transition: "all 0.12s",
+                                  cursor: dragBlock ? "copy" : "default",
+                                }}
+                                onDragOver={e => handleDragOver(e, day, t)}
+                                onDragLeave={() => setDragOver(null)}
+                                onDrop={e => handleDrop(e, day, t, inst)}
+                              >
+                                {isDragTarget && (
+                                  <div style={{ fontSize: 10, color: theme.primary, fontWeight: 700, textAlign: "center", padding: 4 }}>
+                                    Drop here
+                                  </div>
+                                )}
+                              </td>
+                            );
+
+                            const m = info.block;
+                            const rowSpan = info.span;
+
+                            if (m.is_break) return (
+                              <td key={day} rowSpan={rowSpan} style={{ border: "1px solid #ddd", textAlign: "center", height: 44 * rowSpan, background: "#fef9c3" }}>
+                                <span style={{ fontSize: 10, color: "#854d0e", fontWeight: 700 }}>☕ Break</span>
+                              </td>
+                            );
+
+                            const isDragging = dragBlock && m.id === dragBlock.id;
+                            const lb = m.roomType === "Laboratory";
+                            const { code, name, type } = resolveSubjectDisplay(m, codeMap);
+                            const badgeBg = getBadgeBg(type, theme);
+
+                            return (
+                              <td
+                                key={day}
+                                rowSpan={rowSpan}
+                                style={{
+                                  border: `1px solid #ddd`,
+                                  textAlign: "center",
+                                  verticalAlign: "middle",
+                                  height: 44 * rowSpan,
+                                  background: isDragging ? "rgba(0,0,0,0.04)" : (lb ? theme.light2 : theme.light),
+                                  opacity: isDragging ? 0.45 : 1,
+                                  cursor: m.id ? "grab" : "default",
+                                  transition: "all 0.12s",
+                                  outline: isDragging ? `2px dashed ${theme.primary}` : "none",
+                                }}
+                                draggable={!!m.id}
+                                onDragStart={e => m.id && handleDragStart(e, m)}
+                                onDragOver={e => handleDragOver(e, day, t)}
+                                onDragLeave={() => setDragOver(null)}
+                                onDrop={e => handleDrop(e, day, t, inst)}
+                                onDoubleClick={() => m.id && setEditingBlock(m)}
+                              >
+                                <div style={{ display: "inline-flex", alignItems: "center", background: badgeBg, color: "#fff", borderRadius: 4, padding: "2px 8px", fontSize: 10, fontWeight: 900, letterSpacing: 0.8, textTransform: "uppercase", marginBottom: 2 }}>
+                                  {code || name}
+                                </div>
+                                {m.section && <div style={{ fontSize: 9, color: theme.primary, fontWeight: 700 }}>{m.section}</div>}
+                                <div style={{ fontSize: 9, color: "#475569" }}>{m.room}</div>
+                                <div style={{ fontSize: 9, color: lb ? theme.text : "#166534", fontWeight: 700 }}>{lb ? "🔬 Lab" : "📖 Lec"}</div>
+                                {m.id && (
+                                  <div style={{ fontSize: 8, color: "#94a3b8", marginTop: 2 }}>✥ drag</div>
+                                )}
+                              </td>
+                            );
+                          })}
+            </tr>
+          );
+        })}
+      </tbody>
+    </table>
+  </div>
+</div>
+
+{!collapsed[inst] && (
               <div style={{ overflowX: "auto" }}>
-                <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+
+
+
+
+
+                
+<table style={{ width: "100%", borderCollapse: "collapse", tableLayout: "fixed", fontSize: 12 }}>
                   <thead>
                     <tr>
                       <th style={{ background: theme.primary, color: "#fff", padding: "7px 10px", border: `1px solid ${theme.primary3 || theme.primary}`, minWidth: 90, textAlign: "center", fontSize: 11 }}>Time</th>
@@ -2182,9 +2615,9 @@ function InlineScheduleGrid({ schedules, allSchedules, academicYear, semester, o
 
                       return (
                         <tr key={t}>
-                          <td style={{ background: theme.light, border: "1px solid #ddd", padding: "4px 8px", fontWeight: 700, fontSize: 10, textAlign: "center", color: theme.primary, height: 44, whiteSpace: "nowrap" }}>
-                            {fmtRange(t, nextT)}
-                          </td>
+                        <td style={{ background: theme.light, border: "1px solid #ddd", padding: "4px 8px", fontWeight: 700, fontSize: 10, textAlign: "center", color: theme.primary, height: 44, whiteSpace: "nowrap", width: 120, minWidth: 120 }}>
+  {fmtRange(t, nextT)}
+</td>
                           {DAYS.map(day => {
                             const m   = cls.find(c => c.day === day && Number(c.start) <= t && Number(c.end) > t && !c.is_break);
                             const brk = cls.find(c => c.day === day && c.is_break && Number(c.start) <= t && Number(c.end) > t);
@@ -2243,6 +2676,7 @@ function InlineScheduleGrid({ schedules, allSchedules, academicYear, semester, o
                                 onDragOver={e => handleDragOver(e, day, t)}
                                 onDragLeave={() => setDragOver(null)}
                                 onDrop={e => handleDrop(e, day, t, inst)}
+                                onDoubleClick={() => m.id && setEditingBlock(m)}
                               >
                                 <div style={{ display: "inline-flex", alignItems: "center", background: badgeBg, color: "#fff", borderRadius: 4, padding: "2px 8px", fontSize: 10, fontWeight: 900, letterSpacing: 0.8, textTransform: "uppercase", marginBottom: 2 }}>
                                   {code || name}
@@ -2259,9 +2693,10 @@ function InlineScheduleGrid({ schedules, allSchedules, academicYear, semester, o
                         </tr>
                       );
                     })}
-                  </tbody>
+              </tbody>
                 </table>
               </div>
+)}
             </div>
           );
         })}
@@ -2271,48 +2706,106 @@ function InlineScheduleGrid({ schedules, allSchedules, academicYear, semester, o
 }
 
 /* ════════ DRAG-DROP INLINE SCHEDULE GRID — STUDENT ════════ */
-function InlineStudentGrid({ schedules, allSchedules, academicYear, semester, onMoveBlock, theme, codeMap, instructorPool = [] }) {
+/* ════════ DRAG-DROP INLINE SCHEDULE GRID — STUDENT ════════ */
+function InlineStudentGrid({ schedules, allSchedules, academicYear, semester, onMoveBlock, onCheckMove, theme, codeMap, instructorPool = [] }) {
   const [dragBlock, setDragBlock] = useState(null);
   const [dragOver, setDragOver]   = useState(null);
   const [toast, setToast]         = useState(null);
-
+  const [collapsed, setCollapsed] = useState({});
   const real     = schedules.filter(s => !s.is_break);
   const sections = [...new Set(real.filter(s => s.section?.trim()).map(s => s.section))].sort();
 
-  const handlePrint = (section) => {
+useEffect(() => {
+    setCollapsed(prev => {
+      const next = { ...prev };
+      let changed = false;
+      sections.forEach(sec => { if (!(sec in next)) { next[sec] = true; changed = true; } });
+      return changed ? next : prev;
+    });
+  }, [sections.join("|")]);
+
+
+
+const handlePrint = (section) => {
     const win = window.open("", "_blank");
     const content = document.getElementById(`inline-student-print-${section}`)?.innerHTML || "";
-    win.document.write(`<!DOCTYPE html><html><head><title>Schedule - ${section}</title><style>*{box-sizing:border-box;margin:0;padding:0;}body{font-family:Arial,sans-serif;font-size:10pt;color:#000;}.page{padding:14mm;}table{width:100%;border-collapse:collapse;}th{background:${theme.primary};color:#fff;font-weight:bold;padding:6px 4px;text-align:center;border:1px solid ${theme.primary3||theme.primary};font-size:8pt;}td{border:1px solid #ddd;padding:4px;text-align:center;vertical-align:middle;height:40px;}@media print{@page{margin:0;size:A4 landscape;}body{-webkit-print-color-adjust:exact;print-color-adjust:exact;}}</style></head><body><div class="page">${content}</div></body></html>`);
+    win.document.write(`<!DOCTYPE html><html><head><title>Schedule - ${section}</title><style>
+*{box-sizing:border-box;margin:0;padding:0;}
+body{font-family:Arial,sans-serif;font-size:10pt;color:#000;}
+.print-page{
+  width:281mm;
+  height:194mm;      /* A4 landscape (297x210mm) minus 8mm margin on each side */
+  overflow:hidden;
+  position:relative;
+}
+.print-inner{ transform-origin: top left; }
+table{width:100%;border-collapse:collapse;table-layout:fixed;}
+th:first-child,td:first-child{width:80px;}
+th{background:${theme.primary};color:#fff;font-weight:bold;padding:5px 4px;text-align:center;border:1px solid ${theme.primary3||theme.primary};font-size:8pt;}
+td{border:1px solid #ddd;padding:3px;text-align:center;vertical-align:middle;height:34px;font-size:8pt;}
+thead{display:table-header-group;}
+@media print{@page{margin:8mm;size:A4 landscape;}body{-webkit-print-color-adjust:exact;print-color-adjust:exact;}}
+</style></head><body>
+<div class="print-page" id="printPage"><div class="print-inner" id="printInner">${content}</div></div>
+<script>
+  function fitAndPrint() {
+    var outer = document.getElementById('printPage');
+    var inner = document.getElementById('printInner');
+    var availH = outer.clientHeight;   // fixed page height in px
+    var naturalH = inner.scrollHeight; // actual content height, unscaled
+    if (naturalH > availH) {
+      var scale = (availH / naturalH) * 0.98; // small safety margin
+      inner.style.transform = 'scale(' + scale + ')';
+      inner.style.width = (100 / scale) + '%';
+    }
+    setTimeout(function () { window.print(); window.close(); }, 150);
+  }
+  var imgs = Array.prototype.slice.call(document.images);
+  var pending = imgs.filter(function (img) { return !img.complete; }).length;
+  if (pending === 0) {
+    fitAndPrint();
+  } else {
+    var done = 0;
+    imgs.forEach(function (img) {
+      img.addEventListener('load', check);
+      img.addEventListener('error', check);
+    });
+    function check() { done++; if (done >= pending) fitAndPrint(); }
+    setTimeout(fitAndPrint, 2000); // fallback
+  }
+</script>
+</body></html>`);
     win.document.close(); win.focus();
-    setTimeout(() => { win.print(); win.close(); }, 700);
   };
-
+  
   const handleDragStart = (e, block) => {
     setDragBlock(block);
     e.dataTransfer.effectAllowed = "move";
   };
 
-  const handleDrop = async (e, day, time, section) => {
+const handleDrop = async (e, day, time, section) => {
     e.preventDefault();
     if (!dragBlock || dragBlock.section !== section) return;
     setDragOver(null);
     const dur      = dragBlock.end - dragBlock.start;
     const newStart = time;
     const newEnd   = time + dur;
+    if (!(newStart < newEnd)) { setDragBlock(null); return; }
     if (newStart === dragBlock.start && day === dragBlock.day) { setDragBlock(null); return; }
 
-    const others    = allSchedules.filter(s => !s.is_break && s.id !== dragBlock.id);
-    const moved     = { ...dragBlock, day, start: newStart, end: newEnd };
-    const conflicts = detectConflicts([...others, moved]);
-    const relevant  = conflicts.filter(c => c.blockA?.id === dragBlock.id || c.blockB?.id === dragBlock.id);
+   const target = { day, start: newStart, end: newEnd, room: dragBlock.room };
+    const { conflicts, moved, others } = onCheckMove(dragBlock, target);
 
-    if (relevant.length > 0) {
-      setToast({ conflicts: relevant.map(c => ({ ...c, suggestions: findSuggestions(c, others, instructorPool) })) });
+    if (conflicts.length > 0) {
+      setToast({
+        conflicts: conflicts.map(c => ({ ...c, suggestions: findSuggestions(c, others || allSchedules, instructorPool) })),
+        movedBlock: moved,
+      });
       setDragBlock(null);
       return;
     }
 
-    await onMoveBlock(dragBlock, { day, start: newStart, end: newEnd, room: dragBlock.room });
+    await onMoveBlock(dragBlock, target);
     setDragBlock(null);
   };
 
@@ -2329,7 +2822,17 @@ function InlineStudentGrid({ schedules, allSchedules, academicYear, semester, on
           conflicts={toast.conflicts}
           allSchedules={allSchedules}
           onClose={() => setToast(null)}
-          onMoveSchedule={null}
+          onMoveSchedule={async (block, sg) => {
+  const target = toast?.movedBlock || block;
+  const targetRoom  = sg.room || target.room;
+  const targetStart = Number(sg.start);
+  const targetEnd   = Number(sg.end);
+  if (!targetRoom || targetStart === undefined || targetEnd === undefined || targetStart >= targetEnd) return;
+  const payload = { day: sg.day, start: targetStart, end: targetEnd, room: targetRoom };
+  if (sg.instructor) payload.instructor = sg.instructor;
+  await onMoveBlock(target, payload);
+  setToast(null);
+}}
           instructorPool={instructorPool}
         />
       )}
@@ -2353,33 +2856,124 @@ function InlineStudentGrid({ schedules, allSchedules, academicYear, semester, on
         const labH    = realCls.filter(c => c.roomType === "Laboratory").reduce((s, c) => s + (c.end - c.start), 0);
         const lecH    = realCls.filter(c => c.roomType === "Lecture").reduce((s, c) => s + (c.end - c.start), 0);
         const timeSlots = buildPrintTimeSlots(cls);
-
-        return (
+return (
           <div key={sec} style={{ marginBottom: 28, border: `1px solid ${theme.border}`, borderRadius: 10, overflow: "hidden" }}>
-            <div style={{ background: theme.primary, color: "#fff", padding: "9px 16px", display: "flex", alignItems: "center", gap: 14, flexWrap: "wrap" }}>
+            <div
+              style={{ background: theme.primary, color: "#fff", padding: "9px 16px", display: "flex", alignItems: "center", gap: 14, flexWrap: "wrap", cursor: "pointer", userSelect: "none" }}
+              onClick={() => setCollapsed(prev => ({ ...prev, [sec]: !prev[sec] }))}
+            >
               <span style={{ fontWeight: 700, fontSize: 14 }}>🎓 {sec}</span>
               <span style={{ fontSize: 11, opacity: 0.8 }}>⏱ {total} hrs total</span>
               <span style={{ fontSize: 11, opacity: 0.8 }}>📖 {lecH}h Lec</span>
               <span style={{ fontSize: 11, opacity: 0.8 }}>🔬 {labH}h Lab</span>
               <button
-                onClick={() => handlePrint(sec)}
-                style={{ marginLeft: "auto", padding: "5px 14px", background: "rgba(255,255,255,0.15)", color: "#fff", border: "1px solid rgba(255,255,255,0.3)", borderRadius: 7, cursor: "pointer", fontSize: 11, fontWeight: 600 }}
+                onClick={e => { e.stopPropagation(); handlePrint(sec); }}
+                style={{ padding: "5px 14px", background: "rgba(255,255,255,0.15)", color: "#fff", border: "1px solid rgba(255,255,255,0.3)", borderRadius: 7, cursor: "pointer", fontSize: 11, fontWeight: 600 }}
               >
                 🖨 Print
               </button>
+              <span style={{ marginLeft: "auto", fontSize: 12, opacity: 0.85 }}>{collapsed[sec] ? "▶ Show" : "▼ Hide"}</span>
             </div>
 
-            {/* Hidden printable version */}
-            <div id={`inline-student-print-${sec}`} style={{ display: "none" }}>
-              <div style={{ textAlign: "center", fontWeight: "bold", fontSize: 13, textTransform: "uppercase", margin: "8px 0 4px" }}>Class Schedule — {sec}</div>
-              {academicYear && semester && <div style={{ textAlign: "center", fontSize: 10, color: theme.primary, marginBottom: 6 }}>A.Y. {academicYear} · {semester}</div>}
-            </div>
+  {/* Hidden printable version */}
+<div id={`inline-student-print-${sec}`} style={{ display: "none" }}>
+  <div style={{ display: "flex", justifyContent: "center", paddingBottom: 8, marginBottom: 8, borderBottom: "3px double #000" }}>
+    <div style={{ display: "flex", alignItems: "center", gap: 12, maxWidth: 460 }}>
+      <DeptLogo code={theme.code} style={{ width: 48, height: 48, objectFit: "contain", flexShrink: 0 }} alt={theme.code}/>
+      <div style={{ textAlign: "center" }}>
+        <div style={{ fontSize: 14, fontWeight: 900, textTransform: "uppercase" }}>Passi City College</div>
+        <div style={{ fontSize: 10, fontWeight: 700, color: theme.primary, marginTop: 2 }}>{theme.shortName}</div>
+        <div style={{ fontSize: 8, color: "#555", marginTop: 1 }}>Barangay Bacuranan, Passi City, Iloilo</div>
+      </div>
+      <img src={PCCLogo} style={{ width: 48, height: 48, objectFit: "contain", flexShrink: 0 }} alt="PCC"/>
+    </div>
+  </div>
+  <div style={{ textAlign: "center", fontWeight: "bold", fontSize: 13, textTransform: "uppercase", margin: "8px 0 4px" }}>Class Schedule — {sec}</div>
+  {academicYear && semester && <div style={{ textAlign: "center", fontSize: 10, color: theme.primary, marginBottom: 6 }}>A.Y. {academicYear} · {semester}</div>}
+  <table style={{ width: "100%", borderCollapse: "collapse", tableLayout: "fixed", fontSize: 8 }}>
+    <thead><tr>
+      <th style={{ background: theme.primary, color: "#fff", border: `1px solid ${theme.primary}`, padding: "6px 4px", width: 80 }}>Time</th>
+      {DAYS.map(d => <th key={d} style={{ background: theme.primary, color: "#fff", border: `1px solid ${theme.primary}`, padding: "6px 4px" }}>{d}</th>)}
+    </tr></thead>
+    <tbody>
+      {timeSlots.map(t => {
+        if (t === LUNCH_START) return (
+          <tr key="lunch">
+            <td style={{ background: "#fef9c3", border: "1px solid #ddd", padding: "3px 4px", fontWeight: 700, fontSize: 7.5, textAlign: "center", color: "#854d0e", height: 28, whiteSpace: "nowrap" }}>{fmtRange(LUNCH_START, LUNCH_END)}</td>
+            {DAYS.map(day => <td key={day} style={{ border: "1px solid #ddd", textAlign: "center", height: 28, background: "#fef9c3" }}><span style={{ fontSize: 8, color: "#854d0e", fontWeight: 700 }}>🍽 Lunch</span></td>)}
+          </tr>
+        );
+        if (t > LUNCH_START && t < LUNCH_END) return null;
+        const nextT = timeSlots[timeSlots.indexOf(t) + 1] ?? (t + 1);
+        return (
+          <tr key={t}>
+            <td style={{ background: theme.light, border: "1px solid #ddd", padding: "3px 4px", fontWeight: 700, fontSize: 7.5, textAlign: "center", color: theme.primary, height: 40, whiteSpace: "nowrap" }}>{fmtRange(t, nextT)}</td>
+          {DAYS.map(day => {
+                          const info = getCellSpanInfo(cls, day, t, timeSlots);
+                          if (info.kind === "covered") return null;
 
+                          const isDragTarget = dragOver?.day === day && dragOver?.time === t;
+
+                          if (info.kind === "empty") return (
+                            <td
+                              key={day}
+                              style={{ border: `2px solid ${isDragTarget ? theme.primary : "#ddd"}`, height: 44, background: isDragTarget ? theme.light2 : "#fff", transition: "all 0.12s", cursor: dragBlock ? "copy" : "default" }}
+                              onDragOver={e => handleDragOver(e, day, t)}
+                              onDragLeave={() => setDragOver(null)}
+                              onDrop={e => handleDrop(e, day, t, sec)}
+                            >
+                              {isDragTarget && <div style={{ fontSize: 10, color: theme.primary, fontWeight: 700, textAlign: "center", padding: 4 }}>Drop here</div>}
+                            </td>
+                          );
+
+                          const m = info.block;
+                          const rowSpan = info.span;
+
+                          if (m.is_break) return (
+                            <td key={day} rowSpan={rowSpan} style={{ border: "1px solid #ddd", textAlign: "center", height: 44 * rowSpan, background: "#fef9c3" }}>
+                              <span style={{ fontSize: 10, color: "#854d0e", fontWeight: 700 }}>☕ Break</span>
+                            </td>
+                          );
+
+                          const isDragging = dragBlock && m.id === dragBlock.id;
+                          const lb = m.roomType === "Laboratory";
+                          const { code, name, type } = resolveSubjectDisplay(m, codeMap);
+                          const badgeBg = getBadgeBg(type, theme);
+
+                          return (
+                            <td
+                              key={day}
+                              rowSpan={rowSpan}
+                              style={{ border: "1px solid #ddd", textAlign: "center", verticalAlign: "middle", height: 44 * rowSpan, background: isDragging ? "rgba(0,0,0,0.04)" : (lb ? theme.light2 : theme.light), opacity: isDragging ? 0.45 : 1, cursor: m.id ? "grab" : "default", transition: "all 0.12s", outline: isDragging ? `2px dashed ${theme.primary}` : "none" }}
+                              draggable={!!m.id}
+                              onDragStart={e => m.id && handleDragStart(e, m)}
+                              onDragOver={e => handleDragOver(e, day, t)}
+                              onDragLeave={() => setDragOver(null)}
+                              onDrop={e => handleDrop(e, day, t, sec)}
+                            >
+                              <div style={{ display: "inline-flex", alignItems: "center", background: badgeBg, color: "#fff", borderRadius: 4, padding: "2px 8px", fontSize: 10, fontWeight: 900, letterSpacing: 0.8, textTransform: "uppercase", marginBottom: 2 }}>
+                                {code || name}
+                              </div>
+                              {m.instructor && <div style={{ fontSize: 9, color: theme.primary, fontWeight: 700 }}>{m.instructor}</div>}
+                              <div style={{ fontSize: 9, color: "#475569" }}>{m.room}</div>
+                              <div style={{ fontSize: 9, color: lb ? theme.text : "#166534", fontWeight: 700 }}>{lb ? "🔬 Lab" : "📖 Lec"}</div>
+                              {m.id && <div style={{ fontSize: 8, color: "#94a3b8", marginTop: 2 }}>✥ drag</div>}
+                            </td>
+                          );
+                        })}
+          </tr>
+        );
+      })}
+    </tbody>
+  </table>
+</div>
+
+{!collapsed[sec] && (
             <div style={{ overflowX: "auto" }}>
-              <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+              <table style={{ width: "100%", borderCollapse: "collapse", tableLayout: "fixed", fontSize: 12 }}>
                 <thead>
                   <tr>
-                    <th style={{ background: theme.primary, color: "#fff", padding: "7px 10px", border: `1px solid ${theme.primary3 || theme.primary}`, minWidth: 90, textAlign: "center", fontSize: 11 }}>Time</th>
+                    <th style={{ background: theme.primary, color: "#fff", padding: "7px 10px", border: `1px solid ${theme.primary3 || theme.primary}`, width: 120, minWidth: 120, textAlign: "center", fontSize: 11 }}>Time</th>
                     {DAYS.map(d => (
                       <th key={d} style={{ background: theme.primary, color: "#fff", padding: "7px 8px", border: `1px solid ${theme.primary3 || theme.primary}`, textAlign: "center", fontSize: 11, minWidth: 115 }}>{d}</th>
                     ))}
@@ -2398,7 +2992,7 @@ function InlineStudentGrid({ schedules, allSchedules, academicYear, semester, on
 
                     return (
                       <tr key={t}>
-                        <td style={{ background: theme.light, border: "1px solid #ddd", fontWeight: 700, fontSize: 10, textAlign: "center", color: theme.primary, height: 44, whiteSpace: "nowrap", padding: "4px 8px" }}>
+                     <td style={{ background: theme.light, border: "1px solid #ddd", fontWeight: 700, fontSize: 10, textAlign: "center", color: theme.primary, height: 44, whiteSpace: "nowrap", padding: "4px 8px", width: 120, minWidth: 120 }}>
                           {fmtRange(t, nextT)}
                         </td>
                         {DAYS.map(day => {
@@ -2451,10 +3045,11 @@ function InlineStudentGrid({ schedules, allSchedules, academicYear, semester, on
                         })}
                       </tr>
                     );
-                  })}
+                })}
                 </tbody>
               </table>
             </div>
+)}
           </div>
         );
       })}
@@ -2462,43 +3057,67 @@ function InlineStudentGrid({ schedules, allSchedules, academicYear, semester, on
   );
 }
 
+
+
+
+
+
+
+
 /* ════════ DRAG-DROP INLINE ROOM GRID ════════ */
-function InlineRoomGrid({ instructorSchedules, studentSchedules, allSchedules, academicYear, semester, onMoveBlock, theme, codeMap, instructorPool = [] }) {
+/* ════════ DRAG-DROP INLINE ROOM GRID ════════ */
+function InlineRoomGrid({ instructorSchedules, studentSchedules, allSchedules, academicYear, semester, onMoveBlock, onCheckMove, theme, codeMap, instructorPool = [] }) {
   const [dragBlock, setDragBlock] = useState(null);
   const [dragOver, setDragOver]   = useState(null);
   const [toast, setToast]         = useState(null);
   const [selectedRoom, setSelectedRoom] = useState("All");
-
+  const [collapsed, setCollapsed] = useState({});
+  const [editingBlock, setEditingBlock] = useState(null);
   const allBlocks  = buildRoomBlocks(instructorSchedules, studentSchedules);
   const usedRooms  = ALL_ROOMS.filter(r => allBlocks.some(b => b.room === r));
   const displayRooms = selectedRoom === "All" ? usedRooms : (usedRooms.includes(selectedRoom) ? [selectedRoom] : []);
+
+  // ── FIX: was `sections` (doesn't exist in this component) — must be `usedRooms` ──
+  useEffect(() => {
+    setCollapsed(prev => {
+      const next = { ...prev };
+      let changed = false;
+      usedRooms.forEach(r => { if (!(r in next)) { next[r] = true; changed = true; } });
+      return changed ? next : prev;
+    });
+  }, [usedRooms.join("|")]);
+
+
+
 
   const handleDragStart = (e, block) => {
     setDragBlock(block);
     e.dataTransfer.effectAllowed = "move";
   };
 
-  const handleDrop = async (e, day, time, room) => {
+ const handleDrop = async (e, day, time, room) => {
     e.preventDefault();
     if (!dragBlock) return;
     setDragOver(null);
     const dur      = dragBlock.end - dragBlock.start;
     const newStart = time;
     const newEnd   = time + dur;
+    if (!(newStart < newEnd)) { setDragBlock(null); return; }
     if (newStart === dragBlock.start && day === dragBlock.day && room === dragBlock.room) { setDragBlock(null); return; }
 
-    const others    = allSchedules.filter(s => !s.is_break && s.id !== dragBlock.id);
-    const moved     = { ...dragBlock, day, start: newStart, end: newEnd, room, roomType: getRoomType(room) };
-    const conflicts = detectConflicts([...others, moved]);
-    const relevant  = conflicts.filter(c => c.blockA?.id === dragBlock.id || c.blockB?.id === dragBlock.id);
+    const target = { day, start: newStart, end: newEnd, room, roomType: getRoomType(room) };
+    const { conflicts, moved } = onCheckMove(dragBlock, target);
 
-    if (relevant.length > 0) {
-      setToast({ conflicts: relevant.map(c => ({ ...c, suggestions: findSuggestions(c, others, instructorPool) })) });
+    if (conflicts.length > 0) {
+      setToast({
+        conflicts: conflicts.map(c => ({ ...c, suggestions: findSuggestions(c, allSchedules, instructorPool) })),
+        movedBlock: moved,
+      });
       setDragBlock(null);
       return;
     }
 
-    await onMoveBlock(dragBlock, { day, start: newStart, end: newEnd, room, roomType: getRoomType(room) });
+    await onMoveBlock(dragBlock, target);
     setDragBlock(null);
   };
 
@@ -2508,18 +3127,52 @@ function InlineRoomGrid({ instructorSchedules, studentSchedules, allSchedules, a
     setDragOver({ day, time });
   };
 
-  const handlePrint = (room) => {
-    const win = window.open("", "_blank");
+ const handlePrint = (room) => {
+   const win = window.open("", "_blank");
     const content = document.getElementById(`inline-room-print-${room.replace(/\s/g, "-")}`)?.innerHTML || "";
-    win.document.write(`<!DOCTYPE html><html><head><title>Room Schedule - ${room}</title><style>*{box-sizing:border-box;margin:0;padding:0;}body{font-family:Arial,sans-serif;font-size:10pt;color:#000;}.page{padding:14mm;}table{width:100%;border-collapse:collapse;}th{background:${theme.primary};color:#fff;font-weight:bold;padding:6px 4px;text-align:center;border:1px solid ${theme.primary3||theme.primary};font-size:8pt;}td{border:1px solid #ddd;padding:4px;text-align:center;vertical-align:middle;height:40px;}@media print{@page{margin:0;size:A4 landscape;}body{-webkit-print-color-adjust:exact;print-color-adjust:exact;}}</style></head><body><div class="page">${content}</div></body></html>`);
+   win.document.write(`<!DOCTYPE html><html><head><title>Room Schedule - ${room}</title><style>*{box-sizing:border-box;margin:0;padding:0;}body{font-family:Arial,sans-serif;font-size:10pt;color:#000;}.page{width:297mm;padding:14mm;margin:0 auto;}table{width:100%;border-collapse:collapse;table-layout:fixed;}th:first-child,td:first-child{width:80px;}th{background:${theme.primary};color:#fff;font-weight:bold;padding:6px 4px;text-align:center;border:1px solid ${theme.primary3||theme.primary};font-size:8pt;}td{border:1px solid #ddd;padding:4px;text-align:center;vertical-align:middle;height:40px;}tr{page-break-inside:avoid;}thead{display:table-header-group;}@media print{@page{margin:10mm;size:A4 landscape;}body{-webkit-print-color-adjust:exact;print-color-adjust:exact;}}</style></head><body><div class="page">${content}</div></body></html>`);
     win.document.close(); win.focus();
     setTimeout(() => { win.print(); win.close(); }, 700);
   };
-
-  return (
+  
+return (
     <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
-       `1 kjiv c`
-       
+     {toast && (
+        <ConflictToast
+          conflicts={toast.conflicts}
+          allSchedules={allSchedules}
+          onClose={() => setToast(null)}
+          onMoveSchedule={async (block, sg) => {
+            
+  const target = toast?.movedBlock || block;
+  const targetRoom  = sg.room || target.room;
+  const targetStart = Number(sg.start);
+  const targetEnd   = Number(sg.end);
+  if (!targetRoom || targetStart === undefined || targetEnd === undefined || targetStart >= targetEnd) return;
+  const payload = { day: sg.day, start: targetStart, end: targetEnd, room: targetRoom, roomType: getRoomType(targetRoom) };
+  if (sg.instructor) payload.instructor = sg.instructor;
+  await onMoveBlock(target, payload);
+  setToast(null);
+}}
+
+
+          instructorPool={instructorPool}
+        />
+      )}
+
+      {editingBlock && (
+        <EditModal
+          block={editingBlock}
+          theme={theme}
+          onClose={() => setEditingBlock(null)}
+          onSave={async (updated) => {
+            await onMoveBlock(editingBlock, { day: updated.day, start: updated.start, end: updated.end, room: updated.room, roomType: getRoomType(updated.room) });
+            setEditingBlock(null);
+          }}
+        />
+      )}
+
+    
 
       {/* Filter bar */}
       <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", background: theme.light2, borderRadius: 8, padding: "10px 16px", border: `1px solid ${theme.border}` }}>
@@ -2550,30 +3203,123 @@ function InlineRoomGrid({ instructorSchedules, studentSchedules, allSchedules, a
         return (
           <div key={room} style={{ border: `1px solid ${theme.border}`, borderRadius: 10, overflow: "hidden" }}>
             {/* Room header */}
-            <div style={{ background: isLab ? theme.primary : "#16a34a", color: "#fff", padding: "9px 16px", display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+           <div
+              style={{ background: isLab ? theme.primary : "#16a34a", color: "#fff", padding: "9px 16px", display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap", cursor: "pointer", userSelect: "none" }}
+              onClick={() => setCollapsed(prev => ({ ...prev, [room]: !prev[room] }))}
+            >
               <span style={{ fontSize: 18 }}>{isLab ? "🔬" : "📖"}</span>
               <span style={{ fontWeight: 700, fontSize: 14 }}>{room}</span>
               <span style={{ fontSize: 11, opacity: 0.8 }}>{isLab ? "Laboratory" : "Lecture Room"}</span>
               <span style={{ fontSize: 11, opacity: 0.7 }}>· {blocks.length} block(s)</span>
               <button
-                onClick={() => handlePrint(room)}
-                style={{ marginLeft: "auto", padding: "5px 14px", background: "rgba(255,255,255,0.15)", color: "#fff", border: "1px solid rgba(255,255,255,0.3)", borderRadius: 7, cursor: "pointer", fontSize: 11, fontWeight: 600 }}
+                onClick={e => { e.stopPropagation(); handlePrint(room); }}
+                style={{ padding: "5px 14px", background: "rgba(255,255,255,0.15)", color: "#fff", border: "1px solid rgba(255,255,255,0.3)", borderRadius: 7, cursor: "pointer", fontSize: 11, fontWeight: 600 }}
               >
                 🖨 Print
               </button>
+              <span style={{ marginLeft: "auto", fontSize: 12, opacity: 0.85 }}>{collapsed[room] ? "▶ Show" : "▼ Hide"}</span>
             </div>
 
-            {/* Hidden printable area */}
+           {/* Hidden printable area */}
             <div id={`inline-room-print-${room.replace(/\s/g, "-")}`} style={{ display: "none" }}>
+              <div style={{ display: "flex", justifyContent: "center", paddingBottom: 8, marginBottom: 8, borderBottom: "3px double #000" }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 12, maxWidth: 460 }}>
+                  <DeptLogo code={theme.code} style={{ width: 48, height: 48, objectFit: "contain", flexShrink: 0 }} alt={theme.code}/>
+                  <div style={{ textAlign: "center" }}>
+                    <div style={{ fontSize: 14, fontWeight: 900, textTransform: "uppercase" }}>Passi City College</div>
+                    <div style={{ fontSize: 10, fontWeight: 700, color: theme.primary, marginTop: 2 }}>{theme.shortName}</div>
+                    <div style={{ fontSize: 8, color: "#555", marginTop: 1 }}>Passi City, Iloilo, Philippines</div>
+                  </div>
+                  <img src={PCCLogo} style={{ width: 48, height: 48, objectFit: "contain", flexShrink: 0 }} alt="PCC"/>
+                </div>
+              </div>
               <div style={{ textAlign: "center", fontWeight: "bold", fontSize: 13, textTransform: "uppercase", margin: "8px 0 4px" }}>Room Schedule — {room}</div>
+              <div style={{ textAlign: "center", fontSize: 11, fontWeight: 700, color: theme.primary, marginBottom: 3 }}>{room} — {isLab ? "Laboratory" : "Lecture Room"}</div>
               {academicYear && semester && <div style={{ textAlign: "center", fontSize: 10, color: theme.primary, marginBottom: 6 }}>A.Y. {academicYear} · {semester}</div>}
-            </div>
+              <table style={{ width: "100%", borderCollapse: "collapse", tableLayout: "fixed", fontSize: 8 }}>
+                <thead><tr>
+                  <th style={{ background: theme.primary, color: "#fff", border: `1px solid ${theme.primary3 || theme.primary}`, padding: "6px 4px", width: 80 }}>Time</th>
+                  {DAYS.map(d => <th key={d} style={{ background: theme.primary, color: "#fff", border: `1px solid ${theme.primary3 || theme.primary}`, padding: "6px 4px" }}>{d}</th>)}
+                </tr></thead>
+                <tbody>
+                  {timeSlots.map(t => {
+                    if (t === LUNCH_START) return (
+                      <tr key="lunch">
+                        <td style={{ background: "#fef9c3", border: "1px solid #ddd", padding: "3px 4px", fontWeight: 700, fontSize: 7.5, textAlign: "center", color: "#854d0e", height: 28 }}>{fmtRange(LUNCH_START, LUNCH_END)}</td>
+                        {DAYS.map(day => <td key={day} style={{ border: "1px solid #ddd", textAlign: "center", height: 28, background: "#fef9c3" }}><span style={{ fontSize: 8, color: "#854d0e", fontWeight: 700 }}>🍽 Lunch</span></td>)}
+                      </tr>
+                    );
+                    if (t > LUNCH_START && t < LUNCH_END) return null;
+                    const nextT = timeSlots[timeSlots.indexOf(t) + 1] ?? (t + 1);
+                    return (
+                      <tr key={t}>
+                        <td style={{ background: theme.light, border: "1px solid #ddd", padding: "3px 4px", fontWeight: 700, fontSize: 7.5, textAlign: "center", color: theme.primary, height: 40 }}>{fmtRange(t, nextT)}</td>
+                    {DAYS.map(day => {
+                          const info = getCellSpanInfo(blocks, day, t, timeSlots);
+                          if (info.kind === "covered") return null;
 
+                          const isDragTarget = dragOver?.day === day && dragOver?.time === t;
+
+                          if (info.kind === "empty") return (
+                            <td
+                              key={day}
+                              style={{ border: `2px solid ${isDragTarget ? theme.primary : "#ddd"}`, height: 44, background: isDragTarget ? theme.light2 : "#fff", transition: "all 0.12s", cursor: dragBlock ? "copy" : "default" }}
+                              onDragOver={e => handleDragOver(e, day, t)}
+                              onDragLeave={() => setDragOver(null)}
+                              onDrop={e => handleDrop(e, day, t, sec)}
+                            >
+                              {isDragTarget && <div style={{ fontSize: 10, color: theme.primary, fontWeight: 700, textAlign: "center", padding: 4 }}>Drop here</div>}
+                            </td>
+                          );
+
+                          const m = info.block;
+                          const rowSpan = info.span;
+
+                          if (m.is_break) return (
+                            <td key={day} rowSpan={rowSpan} style={{ border: "1px solid #ddd", textAlign: "center", height: 44 * rowSpan, background: "#fef9c3" }}>
+                              <span style={{ fontSize: 10, color: "#854d0e", fontWeight: 700 }}>☕ Break</span>
+                            </td>
+                          );
+
+                          const isDragging = dragBlock && m.id === dragBlock.id;
+                          const lb = m.roomType === "Laboratory";
+                          const { code, name, type } = resolveSubjectDisplay(m, codeMap);
+                          const badgeBg = getBadgeBg(type, theme);
+
+                          return (
+                            <td
+                              key={day}
+                              rowSpan={rowSpan}
+                              style={{ border: "1px solid #ddd", textAlign: "center", verticalAlign: "middle", height: 44 * rowSpan, background: isDragging ? "rgba(0,0,0,0.04)" : (lb ? theme.light2 : theme.light), opacity: isDragging ? 0.45 : 1, cursor: m.id ? "grab" : "default", transition: "all 0.12s", outline: isDragging ? `2px dashed ${theme.primary}` : "none" }}
+                              draggable={!!m.id}
+                              onDragStart={e => m.id && handleDragStart(e, m)}
+                              onDragOver={e => handleDragOver(e, day, t)}
+                              onDragLeave={() => setDragOver(null)}
+                         onDrop={e => handleDrop(e, day, t, room)}
+                            >
+                              <div style={{ display: "inline-flex", alignItems: "center", background: badgeBg, color: "#fff", borderRadius: 4, padding: "2px 8px", fontSize: 10, fontWeight: 900, letterSpacing: 0.8, textTransform: "uppercase", marginBottom: 2 }}>
+                                {code || name}
+                              </div>
+                              {m.instructor && <div style={{ fontSize: 9, color: theme.primary, fontWeight: 700 }}>{m.instructor}</div>}
+                              <div style={{ fontSize: 9, color: "#475569" }}>{m.room}</div>
+                              <div style={{ fontSize: 9, color: lb ? theme.text : "#166534", fontWeight: 700 }}>{lb ? "🔬 Lab" : "📖 Lec"}</div>
+                              {m.id && <div style={{ fontSize: 8, color: "#94a3b8", marginTop: 2 }}>✥ drag</div>}
+                            </td>
+                          );
+                        })}
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+            
+           {!collapsed[room] && (
             <div style={{ overflowX: "auto" }}>
-              <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+              <table style={{ width: "100%", borderCollapse: "collapse", tableLayout: "fixed", fontSize: 12 }}>
                 <thead>
                   <tr>
-                    <th style={{ background: isLab ? theme.primary : "#16a34a", color: "#fff", padding: "7px 10px", border: `1px solid ${isLab ? theme.primary3 || theme.primary : "#15803d"}`, minWidth: 90, textAlign: "center", fontSize: 11 }}>Time</th>
+                    <th style={{ background: isLab ? theme.primary : "#16a34a",color: "#fff", padding: "7px 10px", border: `1px solid ${isLab ? theme.primary3 || theme.primary : "#15803d"}`, width: 120, minWidth: 120, textAlign: "center", fontSize: 11 }}>Time</th>
                     {DAYS.map(d => (
                       <th key={d} style={{ background: isLab ? theme.primary : "#16a34a", color: "#fff", padding: "7px 8px", border: `1px solid ${isLab ? theme.primary3 || theme.primary : "#15803d"}`, textAlign: "center", fontSize: 11, minWidth: 115 }}>{d}</th>
                     ))}
@@ -2592,7 +3338,7 @@ function InlineRoomGrid({ instructorSchedules, studentSchedules, allSchedules, a
 
                     return (
                       <tr key={t}>
-                        <td style={{ background: theme.light, border: "1px solid #ddd", fontWeight: 700, fontSize: 10, textAlign: "center", color: theme.primary, height: 44, whiteSpace: "nowrap", padding: "4px 8px" }}>
+                        <td style={{ background: theme.light, border: "1px solid #ddd", fontWeight: 700, fontSize: 10, textAlign: "center", color: theme.primary, height: 44, whiteSpace: "nowrap", padding: "4px 8px", width: 120, minWidth: 120 }}>
                           {fmtRange(t, nextT)}
                         </td>
                         {DAYS.map(day => {
@@ -2625,7 +3371,9 @@ function InlineRoomGrid({ instructorSchedules, studentSchedules, allSchedules, a
                               onDragOver={e => handleDragOver(e, day, t)}
                               onDragLeave={() => setDragOver(null)}
                               onDrop={e => handleDrop(e, day, t, room)}
+                              onDoubleClick={() => m.id && setEditingBlock(m)}
                             >
+
                               <div style={{ display: "inline-flex", alignItems: "center", background: badgeBg, color: "#fff", borderRadius: 4, padding: "2px 8px", fontSize: 10, fontWeight: 900, letterSpacing: 0.8, textTransform: "uppercase", marginBottom: 2 }}>
                                 {code || name}
                               </div>
@@ -2639,9 +3387,10 @@ function InlineRoomGrid({ instructorSchedules, studentSchedules, allSchedules, a
                       </tr>
                     );
                   })}
-                </tbody>
+             </tbody>
               </table>
             </div>
+            )}
           </div>
         );
       })}
@@ -2695,22 +3444,27 @@ function PageContent({ activePage, data, setData, theme, deptCode, codeMap }) {
   const inpStyle={padding:"10px 12px",border:`1px solid ${theme.border}`,borderRadius:8,fontSize:14,outline:"none"};
   const btnStyle={padding:"11px 20px",background:theme.primary,color:"#fff",border:"none",borderRadius:8,cursor:"pointer",fontSize:14,fontWeight:600,alignSelf:"flex-start"};
 
-  useEffect(()=>{
-    fetch("/api/schedules",{credentials:"include"})
-      .then(r=>r.ok?r.json():[])
-      .then(rows=>{
-        const all = Array.isArray(rows) ? rows : [];
-        const filtered = deptCode ? all.filter(s => !s.dept_code || s.dept_code === deptCode) : all;
-        setData(p=>({...p,schedules:filtered}));
-      }).catch(()=>{});
-    fetch("/api/student-schedules",{credentials:"include"})
-      .then(r=>r.ok?r.json():[])
-      .then(rows=>{
-        const all = Array.isArray(rows) ? rows : [];
-        const filtered = deptCode ? all.filter(s => !s.dept_code || s.dept_code === deptCode) : all;
-        setData(p=>({...p,studentSchedules:filtered}));
-      }).catch(()=>{});
-  },[deptCode]);
+ // ── NEW: whenever the user opens Schedule Output or Room Schedule, pull the
+  // freshest DB rows for BOTH tables. This guarantees the Instructor tab,
+  // Student tab, and Room Schedule all read from the exact same up-to-date
+  // dataset — including any auto-linked rows created by Instructor Load /
+  // Student Load saves, or moves made from a different tab/session.
+  useEffect(() => {
+    if (activePage !== "Schedule Output" && activePage !== "Room Schedule") return;
+    let cancelled = false;
+    Promise.all([
+      fetch("/api/schedules", { credentials: "include" }).then(r => r.ok ? r.json() : []),
+      fetch("/api/student-schedules", { credentials: "include" }).then(r => r.ok ? r.json() : []),
+    ]).then(([instRows, studRows]) => {
+      if (cancelled) return;
+      const allInst = Array.isArray(instRows) ? instRows : [];
+      const allStud = Array.isArray(studRows) ? studRows : [];
+      const filteredInst = deptCode ? allInst.filter(s => !s.dept_code || s.dept_code === deptCode) : allInst;
+      const filteredStud = deptCode ? allStud.filter(s => !s.dept_code || s.dept_code === deptCode) : allStud;
+      setData(p => ({ ...p, schedules: filteredInst, studentSchedules: filteredStud }));
+    }).catch(() => {});
+    return () => { cancelled = true; };
+  }, [activePage, deptCode]);
 
   const saveEdit=(updated)=>{ setData(p=>({...p,schedules:p.schedules.map(s=>s.id===updated.id?updated:s)})); setEditBlock(null); };
 
@@ -2719,19 +3473,192 @@ function PageContent({ activePage, data, setData, theme, deptCode, codeMap }) {
     ...data.studentSchedules.filter(s=>!s.is_break),
   ];
 
-  const handleMoveSchedule = async (block, suggestion) => {
-    if (!block.id) return;
+ // ── LINKED MOVE: updates the source block AND any matching block in the OTHER table ──
+  // "Matching" = same subject + same day + same original start/end, and (same section OR same instructor)
+const findLinkedBlock = (block, otherList) => {
+  // Tier 1: same subject + same day, and every identifying field that is
+  // present on BOTH sides must match — not just one. The old logic used OR,
+  // so a matching section with a *different* instructor was still treated
+  // as "the same class," which caused drags to silently move the wrong
+  // instructor's/section's record.
+  const strictMatch = (s) => {
+    const bothHaveSection    = block.section && s.section;
+    const bothHaveInstructor = block.instructor && s.instructor;
+    if (!bothHaveSection && !bothHaveInstructor) return false; // nothing safe to compare
+    if (bothHaveSection && normName(block.section) !== normName(s.section)) return false;
+    if (bothHaveInstructor && normName(block.instructor) !== normName(s.instructor)) return false;
+    return true;
+  };
+
+  const pickClosest = (list) => list.reduce((best, c) => {
+    const bestDiff = Math.abs(Number(best.start) - Number(block.start)) + Math.abs(Number(best.end) - Number(block.end));
+    const diff     = Math.abs(Number(c.start)    - Number(block.start)) + Math.abs(Number(c.end)    - Number(block.end));
+    return diff < bestDiff ? c : best;
+  });
+
+  const tier1 = otherList.filter(s =>
+    !s.is_break &&
+    normName(s.subject) === normName(block.subject) &&
+    s.day === block.day &&
+    strictMatch(s)
+  );
+  if (tier1.length === 1) return tier1[0];
+  if (tier1.length > 1) return pickClosest(tier1);
+
+  // Tier 2 (recovery fallback): pair may have desynced onto different days
+  // from an earlier bad move. Ignore day, but still require BOTH section
+  // AND instructor to match — never link on a partial match.
+  const tier2 = otherList.filter(s =>
+    !s.is_break &&
+    normName(s.subject) === normName(block.subject) &&
+    block.section && s.section && normName(block.section) === normName(s.section) &&
+    block.instructor && s.instructor && normName(block.instructor) === normName(s.instructor)
+  );
+  if (tier2.length === 0) return null;
+  if (tier2.length === 1) return tier2[0];
+  return pickClosest(tier2);
+};
+
+  const patchSchedule = async (id, payload) => {
+    const res = await fetch(`/api/schedules/${id}`, {
+      method:"PUT", credentials:"include",
+      headers:{"Content-Type":"application/json"},
+      body:JSON.stringify(payload),
+    });
+    return res.json();
+  };
+  const patchStudentSchedule = async (id, payload) => {
+    const res = await fetch(`/api/student-schedules/${id}`, {
+      method:"PUT", credentials:"include",
+      headers:{"Content-Type":"application/json"},
+      body:JSON.stringify(payload),
+    });
+    return res.json();
+  };
+
+  // sourceTable: "instructor" | "student" | "room" (room can match either)
+// NEW
+const handleLinkedMove = async (block, suggestion, sourceTable) => {
+    const payload = {
+      day: suggestion.day,
+      start: Number(suggestion.start),
+      end: Number(suggestion.end),
+      room: suggestion.room || block.room,
+      roomType: getRoomType(suggestion.room || block.room),
+    };
+    if (suggestion.instructor) payload.instructor = suggestion.instructor;
+
+    let updatedInstructor = null;
+    let updatedStudent    = null;
+
+    // ── FIX: trust the caller-supplied sourceTable (and block._src for the
+    // room grid) instead of guessing by scanning both tables for a matching
+    // id. The instructor and student schedule tables have independent
+    // auto-increment ids, so the same numeric id can exist in BOTH tables
+    // at once. The old check (`data.schedules.some(s => s.id === block.id)`)
+    // would match on that coincidental collision and patch the wrong table —
+    // which is why dragging Francis Ray's block could silently update an
+    // unrelated instructor row (Jerahmeel's) while Francis Ray's own row
+    // never changed.
+    let isInstructorRow, isStudentRow;
+    if (sourceTable === "instructor") { isInstructorRow = true;  isStudentRow = false; }
+    else if (sourceTable === "student") { isInstructorRow = false; isStudentRow = true; }
+    else if (sourceTable === "room") {
+      // Room grid blocks are tagged with _src by buildRoomBlocks.
+      isInstructorRow = block._src === "instructor";
+      isStudentRow    = block._src === "student";
+    } else {
+      // Last-resort fallback only — still unreliable, kept only in case
+      // sourceTable is ever omitted.
+      isInstructorRow = data.schedules.some(s => s.id === block.id);
+      isStudentRow    = !isInstructorRow && data.studentSchedules.some(s => s.id === block.id);
+    }
+
+    const originalBlock = isInstructorRow
+      ? data.schedules.find(s => s.id === block.id)
+      : data.studentSchedules.find(s => s.id === block.id);
+
+    if (!originalBlock) { alert("Could not locate the original schedule block to move."); return; }
+
     try {
-      const res = await fetch(`/api/schedules/${block.id}`, {
-        method:"PUT", credentials:"include",
-        headers:{"Content-Type":"application/json"},
-        body:JSON.stringify({ day:suggestion.day, start:suggestion.start, end:suggestion.end, room:suggestion.room, roomType:getRoomType(suggestion.room) }),
-      });
-      const updated = await res.json();
-      if (updated.error) { alert("Move failed: " + updated.error); return; }
-      setData(p => ({ ...p, schedules: p.schedules.map(s => s.id === block.id ? updated : s) }));
+      if (isInstructorRow) {
+        updatedInstructor = await patchSchedule(block.id, payload);
+        if (updatedInstructor.error) { alert("Move failed: " + updatedInstructor.error); return; }
+      } else if (isStudentRow) {
+        updatedStudent = await patchStudentSchedule(block.id, payload);
+        if (updatedStudent.error) { alert("Move failed: " + updatedStudent.error); return; }
+      } else {
+        return;
+      }
+
+      // Find + update the linked block using the ORIGINAL position for matching
+      if (isInstructorRow) {
+        const linked = findLinkedBlock(originalBlock, data.studentSchedules);
+        if (linked) {
+          const ls = await patchStudentSchedule(linked.id, payload);
+          if (!ls.error) updatedStudent = ls;
+        }
+      } else {
+        const linked = findLinkedBlock(originalBlock, data.schedules);
+        if (linked) {
+          const li = await patchSchedule(linked.id, payload);
+          if (!li.error) updatedInstructor = li;
+        }
+      }
+
+      setData(p => ({
+        ...p,
+        schedules: updatedInstructor ? p.schedules.map(s => s.id === updatedInstructor.id ? updatedInstructor : s) : p.schedules,
+        studentSchedules: updatedStudent ? p.studentSchedules.map(s => s.id === updatedStudent.id ? updatedStudent : s) : p.studentSchedules,
+      }));
       setToast(null);
     } catch { alert("Network error while moving schedule."); }
+  };
+  
+
+  // Backward-compatible wrappers used by existing call sites
+  // Backward-compatible wrappers used by existing call sites
+  const handleMoveSchedule    = (block, suggestion) => handleLinkedMove(block, suggestion, "instructor");
+  const handleMoveInstructorL = (block, suggestion) => handleLinkedMove(block, suggestion, "instructor");
+  const handleMoveStudentL    = (block, suggestion) => handleLinkedMove(block, suggestion, "student");
+
+  // ── NEW: Link-aware conflict check used by every drag-and-drop move.
+  // This finds the dragged block's linked twin (instructor-side ↔ student-side
+  // record of the same class) FIRST, then excludes BOTH rows — by id, not by
+  // day/time/room — from the comparison set before running detectConflicts.
+  // This guarantees a class can never be flagged as conflicting with its own
+  // paired record, no matter how far apart their day/time/room may have
+  // drifted from earlier moves or break insertion.
+  const computeMoveConflicts = (block, sourceTable, target) => {
+    const room     = target.room || block.room;
+    const roomType = getRoomType(room);
+
+    let ownList, otherList;
+    if (sourceTable === "student" || (sourceTable === "room" && block._src === "student")) {
+      ownList = data.studentSchedules; otherList = data.schedules;
+    } else {
+      ownList = data.schedules; otherList = data.studentSchedules;
+    }
+
+    const originalOwn = ownList.find(s => s.id === block.id) || block;
+    const linked      = findLinkedBlock(originalOwn, otherList);
+
+    const moved       = { ...originalOwn, day: target.day, start: Number(target.start), end: Number(target.end), room, roomType };
+    const movedLinked = linked ? { ...linked, day: target.day, start: Number(target.start), end: Number(target.end), room, roomType } : null;
+
+    const excludeIds = new Set([originalOwn.id, linked?.id].filter(id => id !== undefined && id !== null));
+    const others = allRealSchedules.filter(s => !s.is_break && !excludeIds.has(s.id));
+
+    const combined  = movedLinked ? [...others, moved, movedLinked] : [...others, moved];
+    const conflicts = detectConflicts(combined);
+
+    const relevantIds = new Set([moved.id, movedLinked?.id].filter(id => id !== undefined && id !== null));
+    const relevant = conflicts.filter(c => relevantIds.has(c.blockA?.id) || relevantIds.has(c.blockB?.id));
+
+    // `others` is returned so suggestion generation can use the SAME
+    // exclusion-aware list — otherwise findSuggestions would see the class's
+    // own (excluded) entries and wrongly treat its own room/time as occupied.
+    return { conflicts: relevant, moved, movedLinked, others };
   };
 
   if (activePage==="Subject Setup")         return <SubjectSetupPage theme={theme} activeSemester={activeSemester} allSchedules={allRealSchedules}/>;
@@ -2926,10 +3853,73 @@ function PageContent({ activePage, data, setData, theme, deptCode, codeMap }) {
       const allConflicts=detectConflicts(combined);
       const newConflicts=allConflicts.filter(c=>realBlocks.some(b=>(normName(b.instructor)===normName(c.blockA?.instructor)&&b.day===c.blockA?.day&&b.start===c.blockA?.start)||(normName(b.instructor)===normName(c.blockB?.instructor)&&b.day===c.blockB?.day&&b.start===c.blockB?.start)||(b.room===c.blockA?.room&&b.day===c.blockA?.day&&b.start===c.blockA?.start)||(b.room===c.blockB?.room&&b.day===c.blockB?.day&&b.start===c.blockB?.start)));
       if(newConflicts.length>0){setToast(newConflicts);return;}
-      try { await fetch("/api/schedules",{method:"POST",credentials:"include",headers:{"Content-Type":"application/json"},body:JSON.stringify({schedules:blocks,academicYearId:data.academicYearId||null})}); } catch {}
-      setData({...data,schedules:[...data.schedules,...blocks]});
-      setGrid({}); setSelectedInstructor("");
-      alert(`Schedule for ${selectedInstructor} saved!`);
+
+      // ── MODIFIED: capture the server's response (rows with real DB ids)
+      // instead of pushing the id-less local `blocks` into state. Without a
+      // real id, `draggable={!!m.id}` disables drag on the new blocks and
+      // handleLinkedMove can't locate them (`data.schedules.find(s=>s.id===block.id)`
+      // fails), which is why brand-new schedules looked "unsynced" and
+      // un-draggable in Instructor/Student/Room output. If the endpoint
+      // doesn't hand back inserted rows, fall back to a full refetch.
+     // ── NEW: auto-create the matching STUDENT-side rows so Student Load & Room Schedule stay in sync ──
+     // ── Save the instructor's own schedule blocks first (this was missing) ──
+  let savedInstructorRows = null;
+  try {
+    const res = await fetch("/api/schedules", {
+      method: "POST", credentials: "include",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ schedules: realBlocks, academicYearId: data.academicYearId || null }),
+    });
+    const saved = res.ok ? await res.json() : null;
+    if (!res.ok) { alert((saved && saved.error) || "Failed to save instructor schedule."); return; }
+    savedInstructorRows = Array.isArray(saved) ? saved : (Array.isArray(saved?.schedules) ? saved.schedules : null);
+  } catch { alert("Network error while saving instructor schedule."); return; }
+
+  if (savedInstructorRows && savedInstructorRows.length) {
+    setData(p => ({ ...p, schedules: [...p.schedules, ...savedInstructorRows] }));
+  } else {
+    try {
+      const refetch = await fetch("/api/schedules", { credentials: "include" });
+      const allRows = refetch.ok ? await refetch.json() : [];
+      const filtered = deptCode ? allRows.filter(s => !s.dept_code || s.dept_code === deptCode) : allRows;
+      setData(p => ({ ...p, schedules: Array.isArray(filtered) ? filtered : p.schedules }));
+      savedInstructorRows = Array.isArray(filtered) ? filtered : realBlocks;
+    } catch { savedInstructorRows = realBlocks; }
+  }
+
+  // ── auto-create the matching STUDENT-side rows so Student Load & Room Schedule stay in sync ──
+  try {
+    const studentBlocksToCreate = [];
+    for (const rb of savedInstructorRows) {
+      if (!rb.section?.trim()) continue;
+      const existingLinked = findLinkedBlock(rb, data.studentSchedules);
+      if (existingLinked) continue;
+      studentBlocksToCreate.push({
+        section: rb.section, subject: rb.subject, day: rb.day,
+        start: rb.start, end: rb.end, room: rb.room, roomType: rb.roomType,
+        instructor: selectedInstructor, is_break: false,
+      });
+    }
+    if (studentBlocksToCreate.length) {
+      const sres = await fetch("/api/student-schedules", {
+        method: "POST", credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ schedules: studentBlocksToCreate, academicYearId: data.academicYearId || null }),
+      });
+      const ssaved = sres.ok ? await sres.json() : null;
+      const insertedStudentRows = Array.isArray(ssaved) ? ssaved : (Array.isArray(ssaved?.schedules) ? ssaved.schedules : null);
+      if (insertedStudentRows && insertedStudentRows.length) {
+        setData(p => ({ ...p, studentSchedules: [...p.studentSchedules, ...insertedStudentRows] }));
+      } else {
+        const refetchS = await fetch("/api/student-schedules", { credentials: "include" });
+        const allSRows = refetchS.ok ? await refetchS.json() : [];
+        const filteredS = deptCode ? allSRows.filter(s => !s.dept_code || s.dept_code === deptCode) : allSRows;
+        setData(p => ({ ...p, studentSchedules: Array.isArray(filteredS) ? filteredS : p.studentSchedules }));
+      }
+    }
+    alert("✅ Instructor schedule saved!");
+  } catch { /* linked creation is non-fatal; instructor schedule already saved */ }
+     setGrid({});
     };
 
     const regular  = instructorPoolList.filter(i => !i.employment_type || i.employment_type === "Regular" || i.employment_type === "Permanent");
@@ -3031,16 +4021,79 @@ function PageContent({ activePage, data, setData, theme, deptCode, codeMap }) {
         }
       } catch {}
 
-      const blocks=DAYS.flatMap(day=>{ const dayBlocks=rawBlocks.filter(b=>b.day===day); return insertBreaks(dayBlocks); });
+    const blocks=DAYS.flatMap(day=>{ const dayBlocks=rawBlocks.filter(b=>b.day===day); return insertBreaks(dayBlocks); });
       const realBlocks=blocks.filter(b=>!b.is_break);
       const combined=[...allRealSchedules,...realBlocks];
       const allConflicts=detectConflicts(combined);
       const newConflicts=allConflicts.filter(c=>realBlocks.some(b=>(b.section===c.blockA?.section&&b.day===c.blockA?.day&&b.start===c.blockA?.start)||(b.section===c.blockB?.section&&b.day===c.blockB?.day&&b.start===c.blockB?.start)||(b.room===c.blockA?.room&&b.day===c.blockA?.day&&b.start===c.blockA?.start)||(b.room===c.blockB?.room&&b.day===c.blockB?.day&&b.start===c.blockB?.start)));
       if(newConflicts.length>0){setToast(newConflicts);return;}
-      try { await fetch("/api/student-schedules",{method:"POST",credentials:"include",headers:{"Content-Type":"application/json"},body:JSON.stringify({schedules:blocks,academicYearId:data.academicYearId||null})}); } catch {}
-      setData({...data,studentSchedules:[...data.studentSchedules,...blocks]});
-      setStudentGrid({}); setSelectedSection("");
-      alert(`Schedule for ${selectedSection} saved!`);
+
+      // ── MODIFIED: same fix as saveSchedule — use the DB rows returned by
+      // the server (with real ids) so these new blocks are immediately
+      // draggable and linkable, instead of the id-less local `blocks`.
+      // ── NEW: auto-create the matching INSTRUCTOR-side rows so Instructor Load & Room Schedule stay in sync ──
+      // ── Save the section's own schedule blocks first (this was missing) ──
+  
+ // ── auto-create the matching INSTRUCTOR-side rows so Instructor Load & Room Schedule stay in sync ──
+ // ── Save the section's own schedule blocks first (this was missing) ──
+      let savedStudentRows = null;
+      try {
+        const res = await fetch("/api/student-schedules", {
+          method: "POST", credentials: "include",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ schedules: realBlocks, academicYearId: data.academicYearId || null }),
+        });
+        const saved = res.ok ? await res.json() : null;
+        if (!res.ok) { alert((saved && saved.error) || "Failed to save student schedule."); return; }
+        savedStudentRows = Array.isArray(saved) ? saved : (Array.isArray(saved?.schedules) ? saved.schedules : null);
+      } catch { alert("Network error while saving student schedule."); return; }
+
+      if (savedStudentRows && savedStudentRows.length) {
+        setData(p => ({ ...p, studentSchedules: [...p.studentSchedules, ...savedStudentRows] }));
+      } else {
+        try {
+          const refetch = await fetch("/api/student-schedules", { credentials: "include" });
+          const allRows = refetch.ok ? await refetch.json() : [];
+          const filtered = deptCode ? allRows.filter(s => !s.dept_code || s.dept_code === deptCode) : allRows;
+          setData(p => ({ ...p, studentSchedules: Array.isArray(filtered) ? filtered : p.studentSchedules }));
+          savedStudentRows = Array.isArray(filtered) ? filtered : realBlocks;
+        } catch { savedStudentRows = realBlocks; }
+      }
+
+      // ── auto-create the matching INSTRUCTOR-side rows so Instructor Load & Room Schedule stay in sync ──
+      try {
+        const instructorBlocksToCreate = [];
+        for (const rb of savedStudentRows) {
+          if (!rb.instructor?.trim()) continue;
+          const existingLinked = findLinkedBlock(rb, data.schedules);
+          if (existingLinked) continue;
+          instructorBlocksToCreate.push({
+            instructor: rb.instructor, subject: rb.subject, day: rb.day,
+            start: rb.start, end: rb.end, room: rb.room, roomType: rb.roomType,
+            section: selectedSection, is_break: false,
+          });
+        }
+        if (instructorBlocksToCreate.length) {
+          const ires = await fetch("/api/schedules", {
+            method: "POST", credentials: "include",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ schedules: instructorBlocksToCreate, academicYearId: data.academicYearId || null }),
+          });
+          const isaved = ires.ok ? await ires.json() : null;
+          const insertedInstructorRows = Array.isArray(isaved) ? isaved : (Array.isArray(isaved?.schedules) ? isaved.schedules : null);
+          if (insertedInstructorRows && insertedInstructorRows.length) {
+            setData(p => ({ ...p, schedules: [...p.schedules, ...insertedInstructorRows] }));
+          } else {
+            const refetchI = await fetch("/api/schedules", { credentials: "include" });
+            const allIRows = refetchI.ok ? await refetchI.json() : [];
+            const filteredI = deptCode ? allIRows.filter(s => !s.dept_code || s.dept_code === deptCode) : allIRows;
+            setData(p => ({ ...p, schedules: Array.isArray(filteredI) ? filteredI : p.schedules }));
+          }
+        }
+        alert("✅ Student schedule saved!");
+      } catch { /* linked creation is non-fatal; student schedule already saved */ }
+       setStudentGrid({});
+        setSelectedSection("");
     };
 
     const autoGenerateFaculty=async()=>{
@@ -3128,33 +4181,11 @@ if (activePage === "Schedule Output") {
     setData({ ...data, studentSchedules: [] });
   };
 
-  const handleMoveInstructor = async (block, suggestion) => {
-    if (!block.id) return;
-    try {
-      const res = await fetch(`/api/schedules/${block.id}`, {
-        method: "PUT", credentials: "include",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ day: suggestion.day, start: suggestion.start, end: suggestion.end, room: suggestion.room, roomType: getRoomType(suggestion.room) }),
-      });
-      const updated = await res.json();
-      if (updated.error) { alert("Move failed: " + updated.error); return; }
-      setData(p => ({ ...p, schedules: p.schedules.map(s => s.id === block.id ? updated : s) }));
-    } catch { alert("Network error."); }
-  };
+ const handleMoveInstructor = (block, suggestion) => handleLinkedMove(block, suggestion, "instructor");
+  
 
-  const handleMoveStudent = async (block, suggestion) => {
-    if (!block.id) return;
-    try {
-      const res = await fetch(`/api/student-schedules/${block.id}`, {
-        method: "PUT", credentials: "include",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ day: suggestion.day, start: suggestion.start, end: suggestion.end, room: suggestion.room, roomType: getRoomType(suggestion.room) }),
-      });
-      const updated = await res.json();
-      if (updated.error) { alert("Move failed: " + updated.error); return; }
-      setData(p => ({ ...p, studentSchedules: p.studentSchedules.map(s => s.id === block.id ? updated : s) }));
-    } catch { alert("Network error."); }
-  };
+ // NEW
+const handleMoveStudent = (block, suggestion) => handleLinkedMove(block, suggestion, "student");
 
   const tabActive   = { padding: "10px 22px", border: "none", cursor: "pointer", fontSize: 13, fontWeight: 600, background: "transparent", borderBottom: `3px solid ${theme.primary}`, color: theme.primary, marginBottom: -2 };
   const tabInactive = { padding: "10px 22px", border: "none", cursor: "pointer", fontSize: 13, fontWeight: 600, background: "transparent", borderBottom: "3px solid transparent", color: "#64748b", marginBottom: -2 };
@@ -3185,13 +4216,18 @@ if (activePage === "Schedule Output") {
       </div>
 
       {/* Inline drag-drop grids */}
-     {toast && (
-        <ConflictToast
-          conflicts={toast.conflicts}
-          allSchedules={allSchedules}
-          onClose={() => setToast(null)}
-          onMoveSchedule={onMoveBlock}
-          instructorPool={instructorPool}
+     {/* Inline drag-drop grids */}
+     {outputTab === "instructor" && (
+        <InlineScheduleGrid
+          schedules={data.schedules}
+          allSchedules={allRealSchedules}
+          academicYear={data.academicYear}
+          semester={data.semester}
+          onMoveBlock={handleMoveInstructor}
+          onCheckMove={(block, target) => computeMoveConflicts(block, "instructor", target)}
+          theme={theme}
+          codeMap={codeMap}
+          instructorPool={instructorPoolList}
         />
       )}
       {outputTab === "student" && (
@@ -3201,6 +4237,7 @@ if (activePage === "Schedule Output") {
           academicYear={data.academicYear}
           semester={data.semester}
           onMoveBlock={handleMoveStudent}
+          onCheckMove={(block, target) => computeMoveConflicts(block, "student", target)}
           theme={theme}
           codeMap={codeMap}
           instructorPool={instructorPoolList}
@@ -3210,14 +4247,26 @@ if (activePage === "Schedule Output") {
   );
 }
   /* ── ROOM SCHEDULE ── */
-  if (activePage==="Room Schedule") {
+  /* ── ROOM SCHEDULE ── */
+ if (activePage==="Room Schedule") {
+    const handleMoveRoom = (block, suggestion) => handleLinkedMove(block, suggestion, "room");
     return (
       <div style={{width:"100%",maxWidth:1300,alignSelf:"flex-start"}}>
-        <RoomScheduleView instructorSchedules={data.schedules} studentSchedules={data.studentSchedules} academicYear={data.academicYear} semester={data.semester} theme={theme} codeMap={codeMap}/>
+        <InlineRoomGrid
+          instructorSchedules={data.schedules}
+          studentSchedules={data.studentSchedules}
+          allSchedules={allRealSchedules}
+          academicYear={data.academicYear}
+          semester={data.semester}
+          onMoveBlock={handleMoveRoom}
+          onCheckMove={(block, target) => computeMoveConflicts(block, "room", target)}
+          theme={theme}
+          codeMap={codeMap}
+          instructorPool={instructorPoolList}
+        />
       </div>
     );
   }
-
   return (
     <div style={{display:"flex",flexDirection:"column",gap:16,width:"100%",maxWidth:1000,alignSelf:"flex-start"}}>
       <SchoolHeader academicYear={data.academicYear} semester={data.semester} theme={theme}/>

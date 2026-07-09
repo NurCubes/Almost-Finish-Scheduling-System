@@ -25,7 +25,6 @@ app.use(session({
 }));
 
 const pythonCmd = process.platform === "win32" ? "python" : "python3";
-const ALL_DEPTS = ["bsit","crim","bsba","bshm","bsed","beed"];
 
 function normName(s) {
   return (s || "").trim().replace(/\s+/g, " ").toLowerCase();
@@ -76,22 +75,14 @@ function isSuperAdmin(req, res, next) {
   res.status(403).json({ message: "Super admin access required." });
 }
 
-function deptScope(req) {
-  if (req.session?.role === "superadmin") return null;
-  return req.session?.departmentId || null;
-}
-
-function getSchema(req) {
+// ── MODIFIED: replaces old getSchema(). Returns a numeric department_id,
+//    or null when a superadmin is viewing the global (all-departments) view. ──
+function getDeptId(req) {
   if (req.session?.role === "superadmin") {
-    if (req.session?.previewDeptCode) return pool.schema(req.session.previewDeptCode);
+    if (req.session?.previewDeptId) return req.session.previewDeptId;
     return null;
   }
-  return pool.schema(req.session?.deptCode);
-}
-
-function scopeWhere(deptId, col = "department_id", startAt = 1) {
-  if (deptId === null) return { clause: "", params: [], next: startAt };
-  return { clause: ` AND ${col} = $${startAt}`, params: [deptId], next: startAt + 1 };
+  return req.session?.departmentId || null;
 }
 
 async function seedAdminIfNeeded() {
@@ -197,10 +188,16 @@ app.get("/api/departments", isAuthenticated, async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// ── MODIFIED: now resolves the dept CODE the frontend sends into a department_id
+//    and stores that id in session (previewDeptId), instead of a schema name. ──
 app.post("/api/set-preview-dept", isAuthenticated, isSuperAdmin, async (req, res) => {
   try {
     const { deptCode } = req.body;
-    req.session.previewDeptCode = deptCode ? deptCode.toLowerCase() : null;
+    if (!deptCode) { req.session.previewDeptId = null; req.session.previewDeptCode = null; return res.json({ ok: true }); }
+    const { rows } = await pool.query("SELECT id, code FROM departments WHERE code=$1", [deptCode.toUpperCase()]);
+    if (!rows[0]) return res.status(404).json({ error: "Department not found." });
+    req.session.previewDeptId = rows[0].id;
+    req.session.previewDeptCode = rows[0].code;
     res.json({ ok: true });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
@@ -276,66 +273,42 @@ app.post("/api/admin-accounts/:id/unlock", isAuthenticated, isSuperAdmin, async 
 
 /* ══════════════════════════ CAPACITY ══════════════════════════ */
 
+// ── MODIFIED: single table, filtered by department_id when present ──
 app.get("/api/capacity", isAuthenticated, async (req, res) => {
   try {
-    const schema = getSchema(req);
-    const q = async (sql) => parseInt((await pool.query(sql)).rows[0].c);
-    if (schema) {
-      res.json({
-        limits: CAPACITY,
-        instructors: await q(`SELECT COUNT(*) AS c FROM ${schema}.instructors`),
-        scheduleBlocks: await q(`SELECT COUNT(*) AS c FROM ${schema}.schedules WHERE is_break=FALSE`),
-        studentBlocks: await q(`SELECT COUNT(*) AS c FROM ${schema}.student_schedules WHERE is_break=FALSE`),
-        sections: await q(`SELECT COUNT(DISTINCT section) AS c FROM ${schema}.student_schedules`),
-        academicYears: await q(`SELECT COUNT(*) AS c FROM ${schema}.academic_years`),
-      });
-    } else {
-      res.json({
-        limits: CAPACITY,
-        instructors: await q(`SELECT COUNT(*) AS c FROM public.instructors`),
-        scheduleBlocks: await q(`SELECT COUNT(*) AS c FROM public.schedules WHERE is_break=FALSE`),
-        studentBlocks: await q(`SELECT COUNT(*) AS c FROM public.student_schedules WHERE is_break=FALSE`),
-        sections: await q(`SELECT COUNT(DISTINCT section) AS c FROM public.student_schedules`),
-        academicYears: await q(`SELECT COUNT(*) AS c FROM public.academic_years`),
-      });
-    }
+    const deptId = getDeptId(req);
+    const q = async (sql, params) => parseInt((await pool.query(sql, params)).rows[0].c);
+    const where = deptId ? "WHERE department_id = $1" : "";
+    const params = deptId ? [deptId] : [];
+    res.json({
+      limits: CAPACITY,
+      instructors:     await q(`SELECT COUNT(*) AS c FROM instructors ${where}`, params),
+      scheduleBlocks:  await q(`SELECT COUNT(*) AS c FROM schedules ${where ? where + " AND" : "WHERE"} is_break=FALSE`, params),
+      studentBlocks:   await q(`SELECT COUNT(*) AS c FROM student_schedules ${where ? where + " AND" : "WHERE"} is_break=FALSE`, params),
+      sections:        await q(`SELECT COUNT(DISTINCT section) AS c FROM student_schedules ${where}`, params),
+      academicYears:   await q(`SELECT COUNT(*) AS c FROM academic_years ${where}`, params),
+    });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 /* ══════════════════════════ INSTRUCTOR REGISTRATION ══════════════════════════ */
 
+// ── MODIFIED: one query (optionally scoped), instead of looping schemas ──
 app.get("/api/instructor-registration", isAuthenticated, async (req, res) => {
   try {
-    const schema = getSchema(req);
-
-    if (!schema) {
-      let allInstructors = [];
-      for (const dept of ALL_DEPTS) {
-        try {
-          const { rows: instructors } = await pool.query(
-            `SELECT id, name, name_lower, department, email, '${dept.toUpperCase()}' AS dept_code FROM ${dept}.instructors ORDER BY name`
-          );
-          for (const inst of instructors) {
-            const { rows } = await pool.query(
-              `SELECT id, subject_name FROM ${dept}.instructor_subjects WHERE instructor_id=$1 ORDER BY subject_name`,
-              [inst.id]
-            );
-            inst.subjects = rows;
-            inst._schemaId = `${dept}::${inst.id}`;
-          }
-          allInstructors = [...allInstructors, ...instructors];
-        } catch (_) {}
-      }
-      return res.json(allInstructors);
-    }
-
-    const deptLabel = (req.session.previewDeptCode || req.session.deptCode || "").toUpperCase();
-    const { rows: instructors } = await pool.query(
-      `SELECT id, name, name_lower, department, email, '${deptLabel}' AS dept_code FROM ${schema}.instructors ORDER BY name`
-    );
+    const deptId = getDeptId(req);
+    const where = deptId ? "WHERE i.department_id = $1" : "";
+    const params = deptId ? [deptId] : [];
+    const { rows: instructors } = await pool.query(`
+      SELECT i.id, i.name, i.name_lower, i.email, d.code AS dept_code
+      FROM instructors i
+      JOIN departments d ON i.department_id = d.id
+      ${where}
+      ORDER BY i.name
+    `, params);
     for (const inst of instructors) {
       const { rows } = await pool.query(
-        `SELECT id, subject_name FROM ${schema}.instructor_subjects WHERE instructor_id=$1 ORDER BY subject_name`,
+        `SELECT id, subject_name FROM instructor_subjects WHERE instructor_id=$1 ORDER BY subject_name`,
         [inst.id]
       );
       inst.subjects = rows;
@@ -346,24 +319,26 @@ app.get("/api/instructor-registration", isAuthenticated, async (req, res) => {
 
 app.get("/api/instructor-registration/all-names", isAuthenticated, async (req, res) => {
   try {
-    const schema = getSchema(req) || "public";
-    const { rows } = await pool.query(
-      `SELECT name FROM ${schema}.instructors ORDER BY name`
-    );
+    const deptId = getDeptId(req);
+    const where = deptId ? "WHERE department_id = $1" : "";
+    const params = deptId ? [deptId] : [];
+    const { rows } = await pool.query(`SELECT name FROM instructors ${where} ORDER BY name`, params);
     res.json(rows.map(r => r.name));
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 app.get("/api/instructor-registration/subjects-for/:instructorName", isAuthenticated, async (req, res) => {
   try {
-    const schema = getSchema(req) || "public";
+    const deptId = getDeptId(req);
     const nameLower = normName(decodeURIComponent(req.params.instructorName));
+    const where = deptId ? "AND department_id = $2" : "";
+    const params = deptId ? [nameLower, deptId] : [nameLower];
     const { rows: instRows } = await pool.query(
-      `SELECT id FROM ${schema}.instructors WHERE name_lower=$1`, [nameLower]
+      `SELECT id FROM instructors WHERE name_lower=$1 ${where}`, params
     );
     if (!instRows[0]) return res.json([]);
     const { rows } = await pool.query(
-      `SELECT subject_name FROM ${schema}.instructor_subjects WHERE instructor_id=$1 ORDER BY subject_name`,
+      `SELECT subject_name FROM instructor_subjects WHERE instructor_id=$1 ORDER BY subject_name`,
       [instRows[0].id]
     );
     res.json(rows.map(r => r.subject_name));
@@ -372,39 +347,40 @@ app.get("/api/instructor-registration/subjects-for/:instructorName", isAuthentic
 
 app.post("/api/instructor-registration", isAuthenticated, async (req, res) => {
   try {
-    const schema = getSchema(req) || "public";
-    let { name, department = "ICT", email = "" } = req.body;
+    const deptId = getDeptId(req) || req.body.department_id;
+    if (!deptId) return res.status(400).json({ error: "Department could not be determined." });
+    let { name, email = "" } = req.body;
     if (!name?.trim()) return res.status(400).json({ error: "Instructor name is required." });
     name = name.trim().replace(/\s+/g, " ");
     const nameLower = normName(name);
-    department = (department || "ICT").trim();
     email = (email || "").trim();
-    const existing = await pool.query(`SELECT id, name FROM ${schema}.instructors WHERE name_lower=$1`, [nameLower]);
+    const existing = await pool.query(
+      `SELECT id, name FROM instructors WHERE department_id=$1 AND name_lower=$2`, [deptId, nameLower]
+    );
     if (existing.rows[0]) return res.status(409).json({ error: `"${existing.rows[0].name}" is already registered.` });
-    const countRes = await pool.query(`SELECT COUNT(*) AS c FROM ${schema}.instructors`);
+    const countRes = await pool.query(`SELECT COUNT(*) AS c FROM instructors WHERE department_id=$1`, [deptId]);
     if (parseInt(countRes.rows[0].c) >= CAPACITY.instructors)
       return res.status(400).json({ error: `Instructor limit reached (${CAPACITY.instructors}).` });
     const { rows } = await pool.query(
-      `INSERT INTO ${schema}.instructors (name,name_lower,department,email) VALUES ($1,$2,$3,$4) RETURNING id`,
-      [name, nameLower, department, email]
+      `INSERT INTO instructors (department_id,name,name_lower,email) VALUES ($1,$2,$3,$4) RETURNING id`,
+      [deptId, name, nameLower, email]
     );
-    res.json({ id:rows[0].id, name, department, email });
+    res.json({ id:rows[0].id, name, email });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 app.post("/api/instructor-registration/:id/subjects", isAuthenticated, async (req, res) => {
   try {
-    const schema = getSchema(req) || "public";
     const { id } = req.params;
     let { subject_name } = req.body;
     if (!subject_name?.trim()) return res.status(400).json({ error: "Subject name is required." });
     subject_name = subject_name.trim().replace(/\s+/g, " ");
     const subjectLower = normName(subject_name);
-    const countRes = await pool.query(`SELECT COUNT(*) AS c FROM ${schema}.instructor_subjects WHERE instructor_id=$1`, [id]);
+    const countRes = await pool.query(`SELECT COUNT(*) AS c FROM instructor_subjects WHERE instructor_id=$1`, [id]);
     if (parseInt(countRes.rows[0].c) >= CAPACITY.subjects_per_inst)
       return res.status(400).json({ error: `Subject limit reached (${CAPACITY.subjects_per_inst}).` });
     const { rows } = await pool.query(
-      `INSERT INTO ${schema}.instructor_subjects (instructor_id,subject_name,subject_lower) VALUES ($1,$2,$3) RETURNING id`,
+      `INSERT INTO instructor_subjects (instructor_id,subject_name,subject_lower) VALUES ($1,$2,$3) RETURNING id`,
       [id, subject_name, subjectLower]
     );
     res.json({ id:rows[0].id, subject_name });
@@ -416,23 +392,21 @@ app.post("/api/instructor-registration/:id/subjects", isAuthenticated, async (re
 
 app.delete("/api/instructor-registration/subjects/:subjectId", isAuthenticated, async (req, res) => {
   try {
-    const schema = getSchema(req) || "public";
-    await pool.query(`DELETE FROM ${schema}.instructor_subjects WHERE id=$1`, [req.params.subjectId]);
+    await pool.query(`DELETE FROM instructor_subjects WHERE id=$1`, [req.params.subjectId]);
     res.json({ deleted: true });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 app.delete("/api/instructor-registration/:id", isAuthenticated, async (req, res) => {
   try {
-    const schema = getSchema(req) || "public";
     const { id } = req.params;
     const usedRes = await pool.query(
-      `SELECT COUNT(*) AS c FROM ${schema}.schedules WHERE instructor_id=$1 AND is_break=FALSE`, [id]
+      `SELECT COUNT(*) AS c FROM schedules WHERE instructor_id=$1 AND is_break=FALSE`, [id]
     );
     if (parseInt(usedRes.rows[0].c) > 0)
       return res.status(400).json({ error: `Cannot delete — ${usedRes.rows[0].c} schedule block(s) linked.` });
-    await pool.query(`DELETE FROM ${schema}.instructor_subjects WHERE instructor_id=$1`, [id]);
-    await pool.query(`DELETE FROM ${schema}.instructors WHERE id=$1`, [id]);
+    await pool.query(`DELETE FROM instructor_subjects WHERE instructor_id=$1`, [id]);
+    await pool.query(`DELETE FROM instructors WHERE id=$1`, [id]);
     res.json({ deleted: true });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
@@ -441,11 +415,12 @@ app.delete("/api/instructor-registration/:id", isAuthenticated, async (req, res)
 
 app.post("/api/academic", isAuthenticated, async (req, res) => {
   try {
-    const schema = getSchema(req) || "public";
+    const deptId = getDeptId(req);
+    if (!deptId) return res.status(400).json({ error: "Department could not be determined." });
     const { year, semester } = req.body;
     const { rows } = await pool.query(
-      `INSERT INTO ${schema}.academic_years (year,semester) VALUES ($1,$2) RETURNING *`,
-      [year, semester]
+      `INSERT INTO academic_years (department_id,year,semester) VALUES ($1,$2,$3) RETURNING *`,
+      [deptId, year, semester]
     );
     res.json(rows[0]);
   } catch (e) { res.status(500).json({ error: e.message }); }
@@ -453,11 +428,11 @@ app.post("/api/academic", isAuthenticated, async (req, res) => {
 
 app.get("/api/academic", isAuthenticated, async (req, res) => {
   try {
-    const schema = getSchema(req) || "public";
-    const { rows } = await pool.query(
-      `SELECT * FROM ${schema}.academic_years ORDER BY id DESC`
-    );
-    res.json(rows);
+    const deptId = getDeptId(req);
+    const where = deptId ? "WHERE department_id = $1" : "";
+    const params = deptId ? [deptId] : [];
+    const { rows } = await pool.query(`SELECT * FROM academic_years ${where} ORDER BY id DESC`, params);
+    res.json(rows[0] || null);
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
@@ -465,15 +440,16 @@ app.get("/api/academic", isAuthenticated, async (req, res) => {
 
 app.post("/api/instructors", isAuthenticated, async (req, res) => {
   try {
-    const schema = getSchema(req) || "public";
+    const deptId = getDeptId(req);
+    if (!deptId) return res.status(400).json({ error: "Department could not be determined." });
     const { name } = req.body;
     if (!name?.trim()) return res.status(400).json({ error: "Name required." });
     const clean = name.trim().replace(/\s+/g, " ");
     const nameLower = normName(clean);
     const { rows } = await pool.query(
-      `INSERT INTO ${schema}.instructors (name,name_lower) VALUES ($1,$2)
-       ON CONFLICT (name) DO UPDATE SET name=EXCLUDED.name RETURNING *`,
-      [clean, nameLower]
+      `INSERT INTO instructors (department_id,name,name_lower) VALUES ($1,$2,$3)
+       ON CONFLICT (department_id, name_lower) DO UPDATE SET name=EXCLUDED.name RETURNING *`,
+      [deptId, clean, nameLower]
     );
     res.json(rows[0]);
   } catch (e) { res.status(500).json({ error: e.message }); }
@@ -481,60 +457,45 @@ app.post("/api/instructors", isAuthenticated, async (req, res) => {
 
 app.get("/api/instructors", isAuthenticated, async (req, res) => {
   try {
-    const schema = getSchema(req) || "public";
-    const { rows } = await pool.query(
-      `SELECT * FROM ${schema}.instructors ORDER BY name`
-    );
+    const deptId = getDeptId(req);
+    const where = deptId ? "WHERE department_id = $1" : "";
+    const params = deptId ? [deptId] : [];
+    const { rows } = await pool.query(`SELECT * FROM instructors ${where} ORDER BY name`, params);
     res.json(rows);
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 /* ══════════════════════════ INSTRUCTOR SCHEDULES ══════════════════════════ */
 
+// ── MODIFIED: one JOIN query, filtered by department_id when scoped ──
 app.get("/api/schedules", isAuthenticated, async (req, res) => {
   try {
-    const schema = getSchema(req);
-    let rows = [];
-    if (schema) {
-      const deptLabel = (req.session.previewDeptCode || req.session.deptCode || "").toUpperCase();
-      const result = await pool.query(`
-        SELECT s.id, i.name AS instructor, s.subject, s.section, s.day,
-               s.start_time AS start, s.end_time AS end,
-               s.room, s.room_type AS "roomType", s.is_break,
-               s.academic_year_id,
-               '${deptLabel}' AS dept_code
-        FROM ${schema}.schedules s
-        JOIN ${schema}.instructors i ON s.instructor_id = i.id
-        ORDER BY i.name, s.day, s.start_time
-      `);
-      rows = result.rows;
-    } else {
-      for (const dept of ALL_DEPTS) {
-        try {
-          const result = await pool.query(`
-            SELECT s.id, i.name AS instructor, s.subject, s.section, s.day,
-                   s.start_time AS start, s.end_time AS end,
-                   s.room, s.room_type AS "roomType", s.is_break,
-                   s.academic_year_id,
-                   '${dept.toUpperCase()}' AS dept_code
-            FROM ${dept}.schedules s
-            JOIN ${dept}.instructors i ON s.instructor_id = i.id
-            ORDER BY i.name, s.day, s.start_time
-          `);
-          rows = [...rows, ...result.rows];
-        } catch (_) {}
-      }
-    }
+    const deptId = getDeptId(req);
+    const where = deptId ? "WHERE s.department_id = $1" : "";
+    const params = deptId ? [deptId] : [];
+    const { rows } = await pool.query(`
+      SELECT s.id, i.name AS instructor, s.subject, s.section, s.day,
+             s.start_time AS start, s.end_time AS end,
+             s.room, s.room_type AS "roomType", s.is_break,
+             s.academic_year_id,
+             d.code AS dept_code
+      FROM schedules s
+      JOIN instructors i  ON s.instructor_id = i.id
+      JOIN departments d  ON s.department_id = d.id
+      ${where}
+      ORDER BY i.name, s.day, s.start_time
+    `, params);
     res.json(rows);
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 app.post("/api/schedules", isAuthenticated, async (req, res) => {
   try {
-    const schema = getSchema(req) || "public";
+    const deptId = getDeptId(req);
+    if (!deptId) return res.status(400).json({ error: "Department could not be determined." });
     const { schedules, academicYearId } = req.body;
     if (!schedules?.length) return res.status(400).json({ error: "No schedules provided." });
-    const totalRes = await pool.query(`SELECT COUNT(*) AS c FROM ${schema}.schedules WHERE is_break=FALSE`);
+    const totalRes = await pool.query(`SELECT COUNT(*) AS c FROM schedules WHERE department_id=$1 AND is_break=FALSE`, [deptId]);
     const totalNow = parseInt(totalRes.rows[0].c);
     const incoming = schedules.filter(s => !s.is_break).length;
     if (totalNow + incoming > CAPACITY.total_schedule_blocks)
@@ -542,17 +503,18 @@ app.post("/api/schedules", isAuthenticated, async (req, res) => {
     for (const s of schedules) {
       const nameLower = normName(s.instructor);
       await pool.query(
-        `INSERT INTO ${schema}.instructors (name,name_lower) VALUES ($1,$2) ON CONFLICT (name) DO NOTHING`,
-        [s.instructor.trim(), nameLower]
+        `INSERT INTO instructors (department_id,name,name_lower) VALUES ($1,$2,$3)
+         ON CONFLICT (department_id, name_lower) DO NOTHING`,
+        [deptId, s.instructor.trim(), nameLower]
       );
       const instRes = await pool.query(
-        `SELECT id FROM ${schema}.instructors WHERE name_lower=$1`, [nameLower]
+        `SELECT id FROM instructors WHERE department_id=$1 AND name_lower=$2`, [deptId, nameLower]
       );
       await pool.query(
-        `INSERT INTO ${schema}.schedules
-         (instructor_id,subject,section,day,start_time,end_time,room,room_type,is_break,academic_year_id)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
-        [instRes.rows[0].id, s.subject, s.section||"", s.day, s.start, s.end,
+        `INSERT INTO schedules
+         (department_id,instructor_id,subject,section,day,start_time,end_time,room,room_type,is_break,academic_year_id)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
+        [deptId, instRes.rows[0].id, s.subject, s.section||"", s.day, s.start, s.end,
          s.room, s.roomType||"Lecture", s.is_break||false, academicYearId||null]
       );
     }
@@ -560,26 +522,28 @@ app.post("/api/schedules", isAuthenticated, async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// NEW
 app.put("/api/schedules/:id", isAuthenticated, async (req, res) => {
   try {
-    const schema = getSchema(req) || "public";
     const { id } = req.params;
-    const { day, start, end, room, roomType } = req.body;
-    if (!day || start === undefined || end === undefined || !room || !roomType)
+    const { day, room, roomType } = req.body;
+    const start = Number(req.body.start);
+    const end   = Number(req.body.end);
+    if (!day || Number.isNaN(start) || Number.isNaN(end) || !room || !roomType)
       return res.status(400).json({ error: "Missing required fields." });
     if (start >= end) return res.status(400).json({ error: "Start time must be before end time." });
-    const existRes = await pool.query(`SELECT id FROM ${schema}.schedules WHERE id=$1`, [id]);
+    const existRes = await pool.query(`SELECT id FROM schedules WHERE id=$1`, [id]);
     if (!existRes.rows[0]) return res.status(404).json({ error: "Schedule not found." });
     await pool.query(
-      `UPDATE ${schema}.schedules SET day=$1,start_time=$2,end_time=$3,room=$4,room_type=$5 WHERE id=$6`,
+      `UPDATE schedules SET day=$1,start_time=$2,end_time=$3,room=$4,room_type=$5 WHERE id=$6`,
       [day, start, end, room, roomType, id]
     );
     const { rows } = await pool.query(`
       SELECT s.id, i.name AS instructor, s.subject, s.section, s.day,
              s.start_time AS start, s.end_time AS end,
              s.room, s.room_type AS "roomType", s.is_break, s.academic_year_id
-      FROM ${schema}.schedules s
-      JOIN ${schema}.instructors i ON s.instructor_id=i.id
+      FROM schedules s
+      JOIN instructors i ON s.instructor_id=i.id
       WHERE s.id=$1
     `, [id]);
     res.json(rows[0]);
@@ -588,17 +552,13 @@ app.put("/api/schedules/:id", isAuthenticated, async (req, res) => {
 
 app.delete("/api/schedules", isAuthenticated, async (req, res) => {
   try {
-    const schema = getSchema(req);
-    if (schema) {
-      await pool.query(`DELETE FROM ${schema}.schedules`);
-      await pool.query(`DELETE FROM ${schema}.instructors`);
+    const deptId = getDeptId(req);
+    if (deptId) {
+      await pool.query(`DELETE FROM schedules WHERE department_id=$1`, [deptId]);
+      await pool.query(`DELETE FROM instructors WHERE department_id=$1`, [deptId]);
     } else {
-      for (const dept of ALL_DEPTS) {
-        try {
-          await pool.query(`DELETE FROM ${dept}.schedules`);
-          await pool.query(`DELETE FROM ${dept}.instructors`);
-        } catch (_) {}
-      }
+      await pool.query(`DELETE FROM schedules`);
+      await pool.query(`DELETE FROM instructors`);
     }
     res.json({ deleted: true });
   } catch (e) { res.status(500).json({ error: e.message }); }
@@ -608,54 +568,40 @@ app.delete("/api/schedules", isAuthenticated, async (req, res) => {
 
 app.get("/api/student-schedules", isAuthenticated, async (req, res) => {
   try {
-    const schema = getSchema(req);
-    let rows = [];
-    if (schema) {
-      const deptLabel = (req.session.previewDeptCode || req.session.deptCode || "").toUpperCase();
-      const result = await pool.query(`
-        SELECT id, section, subject, instructor, day,
-               start_time AS start, end_time AS end,
-               room, room_type AS "roomType", is_break, academic_year_id,
-               '${deptLabel}' AS dept_code
-        FROM ${schema}.student_schedules
-        ORDER BY section, day, start_time
-      `);
-      rows = result.rows;
-    } else {
-      for (const dept of ALL_DEPTS) {
-        try {
-          const result = await pool.query(`
-            SELECT id, section, subject, instructor, day,
-                   start_time AS start, end_time AS end,
-                   room, room_type AS "roomType", is_break, academic_year_id,
-                   '${dept.toUpperCase()}' AS dept_code
-            FROM ${dept}.student_schedules
-            ORDER BY section, day, start_time
-          `);
-          rows = [...rows, ...result.rows];
-        } catch (_) {}
-      }
-    }
+    const deptId = getDeptId(req);
+    const where = deptId ? "WHERE ss.department_id = $1" : "";
+    const params = deptId ? [deptId] : [];
+    const { rows } = await pool.query(`
+      SELECT ss.id, ss.section, ss.subject, ss.instructor, ss.day,
+             ss.start_time AS start, ss.end_time AS end,
+             ss.room, ss.room_type AS "roomType", ss.is_break, ss.academic_year_id,
+             d.code AS dept_code
+      FROM student_schedules ss
+      JOIN departments d ON ss.department_id = d.id
+      ${where}
+      ORDER BY ss.section, ss.day, ss.start_time
+    `, params);
     res.json(rows);
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 app.post("/api/student-schedules", isAuthenticated, async (req, res) => {
   try {
-    const schema = getSchema(req) || "public";
+    const deptId = getDeptId(req);
+    if (!deptId) return res.status(400).json({ error: "Department could not be determined." });
     const { schedules, academicYearId } = req.body;
     if (!schedules?.length) return res.status(400).json({ error: "No schedules provided." });
-    const totalRes = await pool.query(`SELECT COUNT(*) AS c FROM ${schema}.student_schedules WHERE is_break=FALSE`);
+    const totalRes = await pool.query(`SELECT COUNT(*) AS c FROM student_schedules WHERE department_id=$1 AND is_break=FALSE`, [deptId]);
     const totalNow = parseInt(totalRes.rows[0].c);
     const incoming = schedules.filter(s => !s.is_break).length;
     if (totalNow + incoming > CAPACITY.student_schedule_blocks)
       return res.status(400).json({ error: `Student schedule limit reached (${CAPACITY.student_schedule_blocks}).` });
     for (const s of schedules) {
       await pool.query(
-        `INSERT INTO ${schema}.student_schedules
-         (section,subject,instructor,instructor_lower,day,start_time,end_time,room,room_type,is_break,academic_year_id)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
-        [s.section, s.subject, s.instructor||"", normName(s.instructor||""),
+        `INSERT INTO student_schedules
+         (department_id,section,subject,instructor,instructor_lower,day,start_time,end_time,room,room_type,is_break,academic_year_id)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
+        [deptId, s.section, s.subject, s.instructor||"", normName(s.instructor||""),
          s.day, s.start, s.end, s.room, s.roomType||"Lecture", s.is_break||false, academicYearId||null]
       );
     }
@@ -663,24 +609,25 @@ app.post("/api/student-schedules", isAuthenticated, async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-
+// NEW
 app.put("/api/student-schedules/:id", isAuthenticated, async (req, res) => {
   try {
-    const schema = getSchema(req) || "public";
     const { id } = req.params;
-    const { day, start, end, room, roomType } = req.body;
-    if (!day || start === undefined || end === undefined || !room)
+    const { day, room, roomType } = req.body;
+    const start = Number(req.body.start);
+    const end   = Number(req.body.end);
+    if (!day || Number.isNaN(start) || Number.isNaN(end) || !room)
       return res.status(400).json({ error: "Missing required fields." });
     if (start >= end)
       return res.status(400).json({ error: "Start time must be before end time." });
     const existRes = await pool.query(
-      `SELECT id FROM ${schema}.student_schedules WHERE id=$1`, [id]
+      `SELECT id FROM student_schedules WHERE id=$1`, [id]
     );
     if (!existRes.rows[0])
       return res.status(404).json({ error: "Student schedule not found." });
     const rt = roomType || (["Lab A","Lab B","Lab C"].includes(room) ? "Laboratory" : "Lecture");
     await pool.query(
-      `UPDATE ${schema}.student_schedules
+      `UPDATE student_schedules
        SET day=$1, start_time=$2, end_time=$3, room=$4, room_type=$5
        WHERE id=$6`,
       [day, start, end, room, rt, id]
@@ -689,23 +636,20 @@ app.put("/api/student-schedules/:id", isAuthenticated, async (req, res) => {
       `SELECT id, section, subject, instructor, day,
               start_time AS start, end_time AS end,
               room, room_type AS "roomType", is_break, academic_year_id
-       FROM ${schema}.student_schedules WHERE id=$1`,
+       FROM student_schedules WHERE id=$1`,
       [id]
     );
     res.json(rows[0]);
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-
 app.delete("/api/student-schedules", isAuthenticated, async (req, res) => {
   try {
-    const schema = getSchema(req);
-    if (schema) {
-      await pool.query(`DELETE FROM ${schema}.student_schedules`);
+    const deptId = getDeptId(req);
+    if (deptId) {
+      await pool.query(`DELETE FROM student_schedules WHERE department_id=$1`, [deptId]);
     } else {
-      for (const dept of ALL_DEPTS) {
-        try { await pool.query(`DELETE FROM ${dept}.student_schedules`); } catch (_) {}
-      }
+      await pool.query(`DELETE FROM student_schedules`);
     }
     res.json({ deleted: true });
   } catch (e) { res.status(500).json({ error: e.message }); }
@@ -715,61 +659,63 @@ app.delete("/api/student-schedules", isAuthenticated, async (req, res) => {
 
 app.post("/api/generate-faculty-from-students", isAuthenticated, async (req, res) => {
   try {
-    const schema = getSchema(req) || "public";
+    const deptId = getDeptId(req);
+    if (!deptId) return res.status(400).json({ error: "Department could not be determined." });
     const { rows: studentBlocks } = await pool.query(`
       SELECT section, subject, instructor, instructor_lower, day,
              start_time AS start, end_time AS end,
              room, room_type AS "roomType", is_break, academic_year_id
-      FROM ${schema}.student_schedules
-      WHERE is_break=FALSE AND instructor != ''
+      FROM student_schedules
+      WHERE department_id=$1 AND is_break=FALSE AND instructor != ''
       ORDER BY instructor_lower, day, start_time
-    `);
+    `, [deptId]);
     if (!studentBlocks.length)
       return res.status(400).json({ error: "No student schedules with instructors found." });
     let added = 0, skipped = 0;
     for (const b of studentBlocks) {
       const nameLower = normName(b.instructor);
       await pool.query(
-        `INSERT INTO ${schema}.instructors (name,name_lower) VALUES ($1,$2) ON CONFLICT (name) DO NOTHING`,
-        [b.instructor.trim(), nameLower]
+        `INSERT INTO instructors (department_id,name,name_lower) VALUES ($1,$2,$3)
+         ON CONFLICT (department_id, name_lower) DO NOTHING`,
+        [deptId, b.instructor.trim(), nameLower]
       );
       const instRes = await pool.query(
-        `SELECT id FROM ${schema}.instructors WHERE name_lower=$1`, [nameLower]
+        `SELECT id FROM instructors WHERE department_id=$1 AND name_lower=$2`, [deptId, nameLower]
       );
       const instId = instRes.rows[0].id;
       const existRes = await pool.query(
-        `SELECT COUNT(*) AS c FROM ${schema}.schedules
+        `SELECT COUNT(*) AS c FROM schedules
          WHERE instructor_id=$1 AND subject=$2 AND section=$3 AND day=$4
          AND start_time=$5 AND end_time=$6 AND is_break=FALSE`,
         [instId, b.subject, b.section, b.day, b.start, b.end]
       );
       if (parseInt(existRes.rows[0].c) > 0) { skipped++; continue; }
-      await pool.query(
-        `INSERT INTO ${schema}.schedules
-         (instructor_id,subject,section,day,start_time,end_time,room,room_type,is_break,academic_year_id)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,FALSE,$9)`,
-        [instId, b.subject, b.section, b.day, b.start, b.end, b.room, b.roomType, b.academic_year_id]
+    await pool.query(
+        `INSERT INTO schedules
+         (department_id,instructor_id,subject,section,day,start_time,end_time,room,room_type,is_break,academic_year_id)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,FALSE,$10)`,
+        [deptId, instId, b.subject, b.section, b.day, b.start, b.end, b.room, b.roomType, b.academic_year_id]
       );
       added++;
     }
-    const totalRes = await pool.query(`SELECT COUNT(*) AS c FROM ${schema}.schedules WHERE is_break=FALSE`);
-    const instRes = await pool.query(`SELECT COUNT(*) AS c FROM ${schema}.instructors`);
+    const totalRes = await pool.query(`SELECT COUNT(*) AS c FROM schedules WHERE department_id=$1 AND is_break=FALSE`, [deptId]);
+    const instRes = await pool.query(`SELECT COUNT(*) AS c FROM instructors WHERE department_id=$1`, [deptId]);
     res.json({ generated:added, skipped, total:parseInt(totalRes.rows[0].c), instructors:parseInt(instRes.rows[0].c) });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 /* ══════════════════════════ OVERVIEW ══════════════════════════ */
 
+// ── MODIFIED: single GROUP BY query instead of looping schemas per department ──
 app.get("/api/overview", isAuthenticated, isSuperAdmin, async (req, res) => {
   try {
     const { rows: depts } = await pool.query("SELECT * FROM departments ORDER BY code");
     const result = await Promise.all(depts.map(async d => {
-      const schema = pool.schema(d.code);
-      const q = async (sql) => { try { return parseInt((await pool.query(sql)).rows[0].c); } catch(_){ return 0; } };
-      const instructors = await q(`SELECT COUNT(*) AS c FROM ${schema}.instructors`);
-      const schedBlocks = await q(`SELECT COUNT(*) AS c FROM ${schema}.schedules WHERE is_break=FALSE`);
-      const studBlocks = await q(`SELECT COUNT(*) AS c FROM ${schema}.student_schedules WHERE is_break=FALSE`);
-      const sections = await q(`SELECT COUNT(DISTINCT section) AS c FROM ${schema}.student_schedules`);
+      const q = async (sql, params) => { try { return parseInt((await pool.query(sql, params)).rows[0].c); } catch(_){ return 0; } };
+      const instructors = await q(`SELECT COUNT(*) AS c FROM instructors WHERE department_id=$1`, [d.id]);
+      const schedBlocks = await q(`SELECT COUNT(*) AS c FROM schedules WHERE department_id=$1 AND is_break=FALSE`, [d.id]);
+      const studBlocks  = await q(`SELECT COUNT(*) AS c FROM student_schedules WHERE department_id=$1 AND is_break=FALSE`, [d.id]);
+      const sections    = await q(`SELECT COUNT(DISTINCT section) AS c FROM student_schedules WHERE department_id=$1`, [d.id]);
       const adminRes = await pool.query("SELECT name,email FROM local_auth WHERE department_id=$1 AND role='dept_admin'", [d.id]);
       return { ...d, instructors, schedBlocks, studBlocks, sections, adminAccount: adminRes.rows[0]||null };
     }));
@@ -781,79 +727,64 @@ app.get("/api/overview", isAuthenticated, isSuperAdmin, async (req, res) => {
 
 app.get("/api/superadmin/schedules", isAuthenticated, isSuperAdmin, async (req, res) => {
   try {
-    let rows = [];
-    for (const dept of ALL_DEPTS) {
-      try {
-        const result = await pool.query(`
-          SELECT s.id, i.name AS instructor, s.subject, s.section, s.day,
-                 s.start_time AS start, s.end_time AS end, s.room,
-                 s.room_type AS "roomType", s.is_break,
-                 '${dept.toUpperCase()}' AS dept_code
-          FROM ${dept}.schedules s
-          JOIN ${dept}.instructors i ON s.instructor_id=i.id
-          ORDER BY i.name, s.day, s.start_time
-        `);
-        rows = [...rows, ...result.rows];
-      } catch (_) {}
-    }
+    const { rows } = await pool.query(`
+      SELECT s.id, i.name AS instructor, s.subject, s.section, s.day,
+             s.start_time AS start, s.end_time AS end, s.room,
+             s.room_type AS "roomType", s.is_break,
+             d.code AS dept_code
+      FROM schedules s
+      JOIN instructors i  ON s.instructor_id = i.id
+      JOIN departments d  ON s.department_id = d.id
+      ORDER BY i.name, s.day, s.start_time
+    `);
     res.json(rows);
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 app.get("/api/superadmin/student-schedules", isAuthenticated, isSuperAdmin, async (req, res) => {
   try {
-    let rows = [];
-    for (const dept of ALL_DEPTS) {
-      try {
-        const result = await pool.query(`
-          SELECT *, '${dept.toUpperCase()}' AS dept_code
-          FROM ${dept}.student_schedules
-          ORDER BY section, day, start_time
-        `);
-        rows = [...rows, ...result.rows];
-      } catch (_) {}
-    }
+    const { rows } = await pool.query(`
+      SELECT ss.*, d.code AS dept_code
+      FROM student_schedules ss
+      JOIN departments d ON ss.department_id = d.id
+      ORDER BY ss.section, ss.day, ss.start_time
+    `);
     res.json(rows);
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 app.get("/api/superadmin/instructors", isAuthenticated, isSuperAdmin, async (req, res) => {
   try {
-    let rows = [];
-    for (const dept of ALL_DEPTS) {
-      try {
-        const result = await pool.query(`
-          SELECT i.*,
-                 '${dept.toUpperCase()}' AS dept_code,
-                 (SELECT COUNT(*) FROM ${dept}.instructor_subjects WHERE instructor_id=i.id) AS subject_count
-          FROM ${dept}.instructors i
-          ORDER BY i.name
-        `);
-        rows = [...rows, ...result.rows];
-      } catch (_) {}
-    }
+    const { rows } = await pool.query(`
+      SELECT i.*,
+             d.code AS dept_code,
+             (SELECT COUNT(*) FROM instructor_subjects WHERE instructor_id=i.id) AS subject_count
+      FROM instructors i
+      JOIN departments d ON i.department_id = d.id
+      ORDER BY i.name
+    `);
     res.json(rows);
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 /* ══════════════════════════ SUBJECTS ══════════════════════════ */
 
-// ── MODIFIED: added hour_load to SELECT ──
 app.get("/api/subjects", isAuthenticated, async (req, res) => {
   try {
-    const schema = getSchema(req) || "public";
+    const deptId = getDeptId(req);
+    if (!deptId) return res.status(400).json({ error: "Department could not be determined." });
     const { semester } = req.query;
-    const params = [];
-    let whereClause = "";
+    const params = [deptId];
+    let whereClause = "WHERE department_id = $1";
     if (semester) {
       params.push(semester);
-      whereClause = `WHERE semester = $1`;
+      whereClause += ` AND semester = $${params.length}`;
     }
     const { rows } = await pool.query(
       `SELECT id, subject_name, subject_code, subject_description,
               subject_type, semester, year_level, units,
               COALESCE(hour_load, 0) AS hour_load
-       FROM ${schema}.subjects
+       FROM subjects
        ${whereClause}
        ORDER BY year_level, subject_type, subject_name`,
       params
@@ -862,19 +793,19 @@ app.get("/api/subjects", isAuthenticated, async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// ── MODIFIED: added hour_load to INSERT ──
 app.post("/api/subjects", isAuthenticated, async (req, res) => {
   try {
-    const schema = getSchema(req) || "public";
+    const deptId = getDeptId(req);
+    if (!deptId) return res.status(400).json({ error: "Department could not be determined." });
     let {
       subject_name,
       subject_code        = "",
       subject_description = "",
       subject_type        = "Major",
-      semester            = "1st Semester",
-      year_level          = 1,
-      units               = 3,
-      hour_load           = 0,
+      semester             = "1st Semester",
+      year_level           = 1,
+      units                = 3,
+      hour_load            = 0,
     } = req.body;
 
     if (!subject_name?.trim())
@@ -885,27 +816,28 @@ app.post("/api/subjects", isAuthenticated, async (req, res) => {
     subject_description = (subject_description || "").trim();
 
     const dupName = await pool.query(
-      `SELECT id FROM ${schema}.subjects WHERE LOWER(subject_name) = LOWER($1)`,
-      [subject_name]
+      `SELECT id FROM subjects WHERE department_id=$1 AND LOWER(subject_name) = LOWER($2) AND semester=$3`,
+      [deptId, subject_name, semester]
     );
     if (dupName.rows[0])
       return res.status(409).json({ error: `"${subject_name}" already exists in this department.` });
 
     if (subject_code) {
       const dupCode = await pool.query(
-        `SELECT id FROM ${schema}.subjects WHERE subject_code = $1`,
-        [subject_code]
+        `SELECT id FROM subjects WHERE department_id=$1 AND subject_code = $2`,
+        [deptId, subject_code]
       );
       if (dupCode.rows[0])
         return res.status(409).json({ error: `Subject code "${subject_code}" is already used.` });
     }
 
     const { rows } = await pool.query(
-      `INSERT INTO ${schema}.subjects
-         (subject_name, subject_code, subject_description, subject_type, semester, year_level, units, hour_load)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+      `INSERT INTO subjects
+         (department_id, subject_name, subject_code, subject_description, subject_type, semester, year_level, units, hour_load)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
        RETURNING *`,
       [
+        deptId,
         subject_name,
         subject_code        || null,
         subject_description || "",
@@ -917,13 +849,15 @@ app.post("/api/subjects", isAuthenticated, async (req, res) => {
       ]
     );
     res.json(rows[0]);
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  } catch (e) {
+    if (e.code === "23505") return res.status(409).json({ error: "This subject (or its code) already exists in this department." });
+    res.status(500).json({ error: e.message });
+  }
 });
 
-// ── MODIFIED: added hour_load to UPDATE ──
 app.put("/api/subjects/:id", isAuthenticated, async (req, res) => {
   try {
-    const schema = getSchema(req) || "public";
+    const deptId = getDeptId(req);
     const { id } = req.params;
     let {
       subject_name,
@@ -933,7 +867,7 @@ app.put("/api/subjects/:id", isAuthenticated, async (req, res) => {
       semester,
       year_level,
       units,
-      hour_load           = 0,
+      hour_load            = 0,
     } = req.body;
 
     if (!subject_name?.trim())
@@ -944,32 +878,32 @@ app.put("/api/subjects/:id", isAuthenticated, async (req, res) => {
     subject_description = (subject_description || "").trim();
 
     const dupName = await pool.query(
-      `SELECT id FROM ${schema}.subjects WHERE LOWER(subject_name) = LOWER($1) AND id != $2`,
-      [subject_name, id]
+      `SELECT id FROM subjects WHERE department_id=$1 AND LOWER(subject_name) = LOWER($2) AND semester=$3 AND id != $4`,
+      [deptId, subject_name, semester, id]
     );
     if (dupName.rows[0])
       return res.status(409).json({ error: `"${subject_name}" already exists in this department.` });
 
     if (subject_code) {
       const dupCode = await pool.query(
-        `SELECT id FROM ${schema}.subjects WHERE subject_code = $1 AND id != $2`,
-        [subject_code, id]
+        `SELECT id FROM subjects WHERE department_id=$1 AND subject_code = $2 AND id != $3`,
+        [deptId, subject_code, id]
       );
       if (dupCode.rows[0])
         return res.status(409).json({ error: `Subject code "${subject_code}" is already used.` });
     }
 
     const { rows } = await pool.query(
-      `UPDATE ${schema}.subjects
+      `UPDATE subjects
        SET subject_name        = $1,
            subject_code        = $2,
            subject_description = $3,
            subject_type        = $4,
-           semester            = $5,
-           year_level          = $6,
-           units               = $7,
-           hour_load           = $8
-       WHERE id = $9
+           semester             = $5,
+           year_level           = $6,
+           units                = $7,
+           hour_load            = $8
+       WHERE id = $9 AND department_id = $10
        RETURNING *`,
       [
         subject_name,
@@ -981,6 +915,7 @@ app.put("/api/subjects/:id", isAuthenticated, async (req, res) => {
         parseInt(units),
         parseInt(hour_load) || 0,
         id,
+        deptId,
       ]
     );
     if (!rows[0]) return res.status(404).json({ error: "Subject not found." });
@@ -990,130 +925,109 @@ app.put("/api/subjects/:id", isAuthenticated, async (req, res) => {
 
 app.delete("/api/subjects/:id", isAuthenticated, async (req, res) => {
   try {
-    const schema = getSchema(req) || "public";
     const { id } = req.params;
     const inUse = await pool.query(
-      `SELECT COUNT(*) AS c FROM ${schema}.instructor_assignments WHERE subject_id=$1`, [id]
+      `SELECT COUNT(*) AS c FROM instructor_assignments WHERE subject_id=$1`, [id]
     );
     if (parseInt(inUse.rows[0].c) > 0)
       return res.status(400).json({ error: "Cannot delete — subject has instructor assignments. Remove assignments first." });
-    await pool.query(`DELETE FROM ${schema}.subjects WHERE id=$1`, [id]);
+    await pool.query(`DELETE FROM subjects WHERE id=$1`, [id]);
     res.json({ deleted: true });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 /* ══════════════════════════ INSTRUCTOR POOL ══════════════════════════ */
 
-// ── MODIFIED: added max_load to both SELECT blocks ──
 app.get("/api/instructor-pool", isAuthenticated, async (req, res) => {
   try {
-    const schema = getSchema(req) || "public";
-
-    if (!schema) {
-      let all = [];
-      for (const dept of ALL_DEPTS) {
-        try {
-          const { rows } = await pool.query(
-            `SELECT id, name, department, email,
-                    COALESCE(employment_type,'Permanent') AS employment_type,
-                    COALESCE(active_semesters,'Both') AS active_semesters,
-                    COALESCE(max_load, 0) AS max_load,
-                    '${dept.toUpperCase()}' AS dept_code
-             FROM ${dept}.instructors ORDER BY name`
-          );
-          all = [...all, ...rows];
-        } catch (_) {}
-      }
-      return res.json(all);
-    }
-
-    const deptLabel = (req.session.previewDeptCode || req.session.deptCode || "").toUpperCase();
-    const { rows } = await pool.query(
-      `SELECT id, name, department, email,
-              COALESCE(employment_type,'Permanent') AS employment_type,
-              COALESCE(active_semesters,'Both') AS active_semesters,
-              COALESCE(max_load, 0) AS max_load,
-              '${deptLabel}' AS dept_code
-       FROM ${schema}.instructors ORDER BY name`
-    );
+    const deptId = getDeptId(req);
+    const where = deptId ? "WHERE i.department_id = $1" : "";
+    const params = deptId ? [deptId] : [];
+    const { rows } = await pool.query(`
+      SELECT i.id, i.name, i.email,
+             d.code AS department,
+             i.employment_type,
+             COALESCE(i.active_semesters::text, 'Both') AS active_semesters,
+             COALESCE(i.max_load, 0) AS max_load,
+             d.code AS dept_code
+      FROM instructors i
+      JOIN departments d ON i.department_id = d.id
+      ${where}
+      ORDER BY i.name
+    `, params);
     res.json(rows);
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// ── MODIFIED: added max_load to INSERT ──
 app.post("/api/instructor-pool", isAuthenticated, async (req, res) => {
   try {
-    const schema = getSchema(req) || "public";
-    let { name, department = "ICT", email = "", employment_type = "Permanent", active_semesters = "Both", max_load = 0 } = req.body;
+    const deptId = getDeptId(req);
+    if (!deptId) return res.status(400).json({ error: "Department could not be determined." });
+    let { name, email = "", employment_type = "Regular", active_semesters = null, max_load = 0 } = req.body;
     if (!name?.trim()) return res.status(400).json({ error: "Instructor name is required." });
     name = name.trim().replace(/\s+/g, " ");
     const nameLower = normName(name);
-    department = (department || "ICT").trim();
     email = (email || "").trim();
 
     const existing = await pool.query(
-      `SELECT id FROM ${schema}.instructors WHERE name_lower=$1`, [nameLower]
+      `SELECT id FROM instructors WHERE department_id=$1 AND name_lower=$2`, [deptId, nameLower]
     );
     if (existing.rows[0]) return res.status(409).json({ error: `"${name}" is already registered.` });
 
-    const countRes = await pool.query(`SELECT COUNT(*) AS c FROM ${schema}.instructors`);
+    const countRes = await pool.query(`SELECT COUNT(*) AS c FROM instructors WHERE department_id=$1`, [deptId]);
     if (parseInt(countRes.rows[0].c) >= CAPACITY.instructors)
       return res.status(400).json({ error: `Instructor limit reached (${CAPACITY.instructors}).` });
 
     const { rows } = await pool.query(
-      `INSERT INTO ${schema}.instructors (name, name_lower, department, email, employment_type, active_semesters, max_load)
-       VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING id, name, department, email, employment_type, active_semesters, max_load`,
-      [name, nameLower, department, email, employment_type, active_semesters, parseInt(max_load) || 0]
+      `INSERT INTO instructors (department_id, name, name_lower, email, employment_type, active_semesters, max_load)
+       VALUES ($1,$2,$3,$4,$5,$6,$7)
+       RETURNING id, name, email, employment_type, active_semesters, max_load`,
+      [deptId, name, nameLower, email, employment_type, active_semesters, parseInt(max_load) || 0]
     );
     res.json(rows[0]);
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// ── MODIFIED: added max_load to both UPDATE branches ──
 app.put("/api/instructor-pool/:id", isAuthenticated, async (req, res) => {
   try {
-    const schema = getSchema(req) || "public";
     const { id } = req.params;
-    const { name, email, department, employment_type, active_semesters, max_load } = req.body;
+    const { name, email, employment_type, active_semesters, max_load } = req.body;
 
-    const existing = await pool.query(
-      `SELECT * FROM ${schema}.instructors WHERE id=$1`, [id]
-    );
+    const existing = await pool.query(`SELECT * FROM instructors WHERE id=$1`, [id]);
     if (!existing.rows[0]) return res.status(404).json({ error: "Instructor not found." });
 
     if (name) {
       const clean = name.trim().replace(/\s+/g, " ");
       const nameLower = normName(clean);
       const dup = await pool.query(
-        `SELECT id FROM ${schema}.instructors WHERE name_lower=$1 AND id!=$2`, [nameLower, id]
+        `SELECT id FROM instructors WHERE department_id=$1 AND name_lower=$2 AND id!=$3`,
+        [existing.rows[0].department_id, nameLower, id]
       );
       if (dup.rows[0]) return res.status(409).json({ error: `"${clean}" already exists.` });
 
       const { rows } = await pool.query(
-        `UPDATE ${schema}.instructors
+        `UPDATE instructors
          SET name=$1, name_lower=$2,
              email=COALESCE($3, email),
-             department=COALESCE($4, department),
-             employment_type=COALESCE($5, employment_type),
-             active_semesters=COALESCE($6, active_semesters),
-             max_load=COALESCE($7, max_load)
-         WHERE id=$8
-         RETURNING id, name, department, email, employment_type, active_semesters, max_load`,
-        [clean, nameLower, email||null, department||null, employment_type||null, active_semesters||null, max_load != null ? parseInt(max_load) : null, id]
+             employment_type=COALESCE($4, employment_type),
+             active_semesters=COALESCE($5, active_semesters),
+             max_load=COALESCE($6, max_load)
+         WHERE id=$7
+         RETURNING id, name, email, employment_type, active_semesters, max_load`,
+        [clean, nameLower, email||null, employment_type||null, active_semesters||null, max_load != null ? parseInt(max_load) : null, id]
       );
       return res.json(rows[0]);
     }
 
     const { rows } = await pool.query(
-      `UPDATE ${schema}.instructors
+      `UPDATE instructors
        SET email=COALESCE($1, email),
-           department=COALESCE($2, department),
-           employment_type=COALESCE($3, employment_type),
-           active_semesters=COALESCE($4, active_semesters),
-           max_load=COALESCE($5, max_load)
-       WHERE id=$6
-       RETURNING id, name, department, email, employment_type, active_semesters, max_load`,
-      [email||null, department||null, employment_type||null, active_semesters||null, max_load != null ? parseInt(max_load) : null, id]
+           employment_type=COALESCE($2, employment_type),
+           active_semesters=COALESCE($3, active_semesters),
+           max_load=COALESCE($4, max_load)
+       WHERE id=$5
+       RETURNING id, name, email, employment_type, active_semesters, max_load`,
+      [email||null, employment_type||null, active_semesters||null, max_load != null ? parseInt(max_load) : null, id]
     );
     res.json(rows[0]);
   } catch (e) { res.status(500).json({ error: e.message }); }
@@ -1121,18 +1035,17 @@ app.put("/api/instructor-pool/:id", isAuthenticated, async (req, res) => {
 
 app.delete("/api/instructor-pool/:id", isAuthenticated, async (req, res) => {
   try {
-    const schema = getSchema(req) || "public";
     const { id } = req.params;
 
     const usedInSched = await pool.query(
-      `SELECT COUNT(*) AS c FROM ${schema}.schedules WHERE instructor_id=$1 AND is_break=FALSE`, [id]
+      `SELECT COUNT(*) AS c FROM schedules WHERE instructor_id=$1 AND is_break=FALSE`, [id]
     );
     if (parseInt(usedInSched.rows[0].c) > 0)
       return res.status(400).json({ error: `Cannot delete — ${usedInSched.rows[0].c} schedule block(s) linked.` });
 
-    await pool.query(`DELETE FROM ${schema}.instructor_assignments WHERE instructor_id=$1`, [id]);
-    await pool.query(`DELETE FROM ${schema}.instructor_subjects WHERE instructor_id=$1`, [id]);
-    await pool.query(`DELETE FROM ${schema}.instructors WHERE id=$1`, [id]);
+    await pool.query(`DELETE FROM instructor_assignments WHERE instructor_id=$1`, [id]);
+    await pool.query(`DELETE FROM instructor_subjects WHERE instructor_id=$1`, [id]);
+    await pool.query(`DELETE FROM instructors WHERE id=$1`, [id]);
     res.json({ deleted: true });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
@@ -1141,50 +1054,25 @@ app.delete("/api/instructor-pool/:id", isAuthenticated, async (req, res) => {
 
 app.get("/api/instructor-assignments", isAuthenticated, async (req, res) => {
   try {
-    const schema = getSchema(req) || "public";
+    const deptId = getDeptId(req);
     const { semester, instructor_name } = req.query;
 
-    if (!schema) {
-      let all = [];
-      for (const dept of ALL_DEPTS) {
-        try {
-          let whereClause = "WHERE 1=1";
-          const params = [];
-          if (semester) { params.push(semester); whereClause += ` AND ia.semester = $${params.length}`; }
-          if (instructor_name) { params.push(normName(instructor_name)); whereClause += ` AND i.name_lower = $${params.length}`; }
-          const { rows } = await pool.query(`
-            SELECT ia.id, ia.semester,
-                   i.id AS instructor_id, i.name AS instructor_name,
-                   COALESCE(i.employment_type,'Permanent') AS employment_type,
-                   s.id AS subject_id, s.subject_name, s.subject_code,
-                   s.subject_description, s.subject_type, s.year_level, s.units,
-                   '${dept.toUpperCase()}' AS dept_code
-            FROM ${dept}.instructor_assignments ia
-            JOIN ${dept}.instructors i ON ia.instructor_id = i.id
-            JOIN ${dept}.subjects s    ON ia.subject_id    = s.id
-            ${whereClause}
-            ORDER BY i.name, s.subject_name
-          `, params);
-          all = [...all, ...rows];
-        } catch (_) {}
-      }
-      return res.json(all);
-    }
-
-    let whereClause = "WHERE 1=1";
-    const params = [];
+    let whereClause = deptId ? "WHERE i.department_id = $1" : "WHERE 1=1";
+    const params = deptId ? [deptId] : [];
     if (semester) { params.push(semester); whereClause += ` AND ia.semester = $${params.length}`; }
     if (instructor_name) { params.push(normName(instructor_name)); whereClause += ` AND i.name_lower = $${params.length}`; }
 
     const { rows } = await pool.query(`
       SELECT ia.id, ia.semester,
              i.id AS instructor_id, i.name AS instructor_name,
-             COALESCE(i.employment_type,'Permanent') AS employment_type,
+             COALESCE(i.employment_type::text,'Regular') AS employment_type,
              s.id AS subject_id, s.subject_name, s.subject_code,
-             s.subject_description, s.subject_type, s.year_level, s.units
-      FROM ${schema}.instructor_assignments ia
-      JOIN ${schema}.instructors i ON ia.instructor_id = i.id
-      JOIN ${schema}.subjects s    ON ia.subject_id    = s.id
+             s.subject_description, s.subject_type, s.year_level, s.units,
+             d.code AS dept_code
+      FROM instructor_assignments ia
+      JOIN instructors i  ON ia.instructor_id = i.id
+      JOIN subjects s     ON ia.subject_id    = s.id
+      JOIN departments d  ON i.department_id  = d.id
       ${whereClause}
       ORDER BY i.name, s.subject_name
     `, params);
@@ -1194,23 +1082,18 @@ app.get("/api/instructor-assignments", isAuthenticated, async (req, res) => {
 
 app.post("/api/instructor-assignments", isAuthenticated, async (req, res) => {
   try {
-    const schema = getSchema(req) || "public";
     const { instructor_id, subject_id, semester } = req.body;
     if (!instructor_id || !subject_id || !semester)
       return res.status(400).json({ error: "instructor_id, subject_id, and semester are required." });
 
-    const instCheck = await pool.query(
-      `SELECT id, name FROM ${schema}.instructors WHERE id=$1`, [instructor_id]
-    );
+    const instCheck = await pool.query(`SELECT id, name FROM instructors WHERE id=$1`, [instructor_id]);
     if (!instCheck.rows[0]) return res.status(404).json({ error: "Instructor not found." });
 
-    const subCheck = await pool.query(
-      `SELECT id, subject_name FROM ${schema}.subjects WHERE id=$1`, [subject_id]
-    );
+    const subCheck = await pool.query(`SELECT id, subject_name FROM subjects WHERE id=$1`, [subject_id]);
     if (!subCheck.rows[0]) return res.status(404).json({ error: "Subject not found." });
 
     const { rows } = await pool.query(
-      `INSERT INTO ${schema}.instructor_assignments (instructor_id, subject_id, semester)
+      `INSERT INTO instructor_assignments (instructor_id, subject_id, semester)
        VALUES ($1,$2,$3)
        ON CONFLICT (instructor_id, subject_id, semester) DO NOTHING
        RETURNING id`,
@@ -1221,12 +1104,12 @@ app.post("/api/instructor-assignments", isAuthenticated, async (req, res) => {
     const { rows: full } = await pool.query(`
       SELECT ia.id, ia.semester,
              i.id AS instructor_id, i.name AS instructor_name,
-             COALESCE(i.employment_type,'Permanent') AS employment_type,
+             COALESCE(i.employment_type::text,'Regular') AS employment_type,
              s.id AS subject_id, s.subject_name, s.subject_code,
              s.subject_description, s.subject_type, s.year_level, s.units
-      FROM ${schema}.instructor_assignments ia
-      JOIN ${schema}.instructors i ON ia.instructor_id = i.id
-      JOIN ${schema}.subjects s    ON ia.subject_id    = s.id
+      FROM instructor_assignments ia
+      JOIN instructors i ON ia.instructor_id = i.id
+      JOIN subjects s    ON ia.subject_id    = s.id
       WHERE ia.id=$1
     `, [rows[0].id]);
     res.json(full[0]);
@@ -1238,8 +1121,7 @@ app.post("/api/instructor-assignments", isAuthenticated, async (req, res) => {
 
 app.delete("/api/instructor-assignments/:id", isAuthenticated, async (req, res) => {
   try {
-    const schema = getSchema(req) || "public";
-    await pool.query(`DELETE FROM ${schema}.instructor_assignments WHERE id=$1`, [req.params.id]);
+    await pool.query(`DELETE FROM instructor_assignments WHERE id=$1`, [req.params.id]);
     res.json({ deleted: true });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
@@ -1248,16 +1130,14 @@ app.delete("/api/instructor-assignments/:id", isAuthenticated, async (req, res) 
 
 app.get("/api/sections", isAuthenticated, async (req, res) => {
   try {
-    const schema = getSchema(req) || "public";
+    const deptId = getDeptId(req);
+    if (!deptId) return res.status(400).json({ error: "Department could not be determined." });
     const { semester } = req.query;
-    const params = [];
-    let where = "";
-    if (semester) { params.push(semester); where = `WHERE semester = $1`; }
+    const params = [deptId];
+    let where = "WHERE department_id = $1";
+    if (semester) { params.push(semester); where += ` AND semester = $${params.length}`; }
     const { rows } = await pool.query(
-      `SELECT id, section_name, year_level, semester
-       FROM ${schema}.sections
-       ${where}
-       ORDER BY year_level, section_name`,
+      `SELECT id, section_name, year_level, semester FROM sections ${where} ORDER BY year_level, section_name`,
       params
     );
     res.json(rows);
@@ -1266,21 +1146,22 @@ app.get("/api/sections", isAuthenticated, async (req, res) => {
 
 app.post("/api/sections", isAuthenticated, async (req, res) => {
   try {
-    const schema = getSchema(req) || "public";
+    const deptId = getDeptId(req);
+    if (!deptId) return res.status(400).json({ error: "Department could not be determined." });
     const { section_name, year_level = 1, semester = "1st Semester" } = req.body;
     if (!section_name?.trim())
       return res.status(400).json({ error: "Section name is required." });
     const clean = section_name.trim().replace(/\s+/g, " ");
     const dup = await pool.query(
-      `SELECT id FROM ${schema}.sections WHERE LOWER(section_name)=LOWER($1) AND semester=$2`,
-      [clean, semester]
+      `SELECT id FROM sections WHERE department_id=$1 AND LOWER(section_name)=LOWER($2) AND semester=$3`,
+      [deptId, clean, semester]
     );
     if (dup.rows[0])
       return res.status(409).json({ error: `"${clean}" already exists for ${semester}.` });
     const { rows } = await pool.query(
-      `INSERT INTO ${schema}.sections (section_name, year_level, semester)
-       VALUES ($1,$2,$3) RETURNING *`,
-      [clean, parseInt(year_level), semester]
+      `INSERT INTO sections (department_id, section_name, year_level, semester)
+       VALUES ($1,$2,$3,$4) RETURNING *`,
+      [deptId, clean, parseInt(year_level), semester]
     );
     res.json(rows[0]);
   } catch (e) { res.status(500).json({ error: e.message }); }
@@ -1288,22 +1169,22 @@ app.post("/api/sections", isAuthenticated, async (req, res) => {
 
 app.put("/api/sections/:id", isAuthenticated, async (req, res) => {
   try {
-    const schema = getSchema(req) || "public";
+    const deptId = getDeptId(req);
     const { id } = req.params;
     const { section_name, year_level, semester } = req.body;
     if (!section_name?.trim())
       return res.status(400).json({ error: "Section name is required." });
     const clean = section_name.trim().replace(/\s+/g, " ");
     const dup = await pool.query(
-      `SELECT id FROM ${schema}.sections WHERE LOWER(section_name)=LOWER($1) AND semester=$2 AND id!=$3`,
-      [clean, semester, id]
+      `SELECT id FROM sections WHERE department_id=$1 AND LOWER(section_name)=LOWER($2) AND semester=$3 AND id!=$4`,
+      [deptId, clean, semester, id]
     );
     if (dup.rows[0])
       return res.status(409).json({ error: `"${clean}" already exists for ${semester}.` });
     const { rows } = await pool.query(
-      `UPDATE ${schema}.sections SET section_name=$1, year_level=$2, semester=$3
-       WHERE id=$4 RETURNING *`,
-      [clean, parseInt(year_level), semester, id]
+      `UPDATE sections SET section_name=$1, year_level=$2, semester=$3
+       WHERE id=$4 AND department_id=$5 RETURNING *`,
+      [clean, parseInt(year_level), semester, id, deptId]
     );
     if (!rows[0]) return res.status(404).json({ error: "Section not found." });
     res.json(rows[0]);
@@ -1312,8 +1193,7 @@ app.put("/api/sections/:id", isAuthenticated, async (req, res) => {
 
 app.delete("/api/sections/:id", isAuthenticated, async (req, res) => {
   try {
-    const schema = getSchema(req) || "public";
-    await pool.query(`DELETE FROM ${schema}.sections WHERE id=$1`, [req.params.id]);
+    await pool.query(`DELETE FROM sections WHERE id=$1`, [req.params.id]);
     res.json({ deleted: true });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
@@ -1322,10 +1202,12 @@ app.delete("/api/sections/:id", isAuthenticated, async (req, res) => {
 
 app.post("/api/generate", isAuthenticated, async (req, res) => {
   try {
-    const schema = getSchema(req) || "public";
+    const deptId = getDeptId(req);
     const type = req.body.type === "student" ? "student" : "instructor";
     const table = type === "student" ? "student_schedules" : "schedules";
-    const res2 = await pool.query(`SELECT COUNT(*) AS c FROM ${schema}.${table} WHERE is_break=FALSE`);
+    const where = deptId ? "WHERE department_id=$1 AND is_break=FALSE" : "WHERE is_break=FALSE";
+    const params = deptId ? [deptId] : [];
+    const res2 = await pool.query(`SELECT COUNT(*) AS c FROM ${table} ${where}`, params);
     if (parseInt(res2.rows[0].c) === 0)
       return res.status(400).json({ error: `No ${type} schedules in database.` });
     ensureLogos();
@@ -1372,15 +1254,10 @@ app.get("/api/backup", isAuthenticated, isSuperAdmin, async (req, res) => {
 
 app.get("/db-status", async (req, res) => {
   try {
-    let schedules = 0, student_schedules = 0, instructors = 0;
-    for (const dept of ALL_DEPTS) {
-      try {
-        schedules += parseInt((await pool.query(`SELECT COUNT(*) AS c FROM ${dept}.schedules WHERE is_break=FALSE`)).rows[0].c);
-        student_schedules += parseInt((await pool.query(`SELECT COUNT(*) AS c FROM ${dept}.student_schedules WHERE is_break=FALSE`)).rows[0].c);
-        instructors += parseInt((await pool.query(`SELECT COUNT(*) AS c FROM ${dept}.instructors`)).rows[0].c);
-      } catch (_) {}
-    }
-    const academic_years = parseInt((await pool.query("SELECT COUNT(*) AS c FROM public.academic_years")).rows[0].c);
+    const schedules          = parseInt((await pool.query(`SELECT COUNT(*) AS c FROM schedules WHERE is_break=FALSE`)).rows[0].c);
+    const student_schedules  = parseInt((await pool.query(`SELECT COUNT(*) AS c FROM student_schedules WHERE is_break=FALSE`)).rows[0].c);
+    const instructors        = parseInt((await pool.query(`SELECT COUNT(*) AS c FROM instructors`)).rows[0].c);
+    const academic_years     = parseInt((await pool.query(`SELECT COUNT(*) AS c FROM academic_years`)).rows[0].c);
     res.json({ schedules, student_schedules, instructors, academic_years });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
@@ -1388,15 +1265,10 @@ app.get("/db-status", async (req, res) => {
 /* ══════════════════════════ START ══════════════════════════ */
 
 seedAdminIfNeeded().then(async () => {
-  let sc = 0, ssc = 0, ic = 0;
-  for (const dept of ALL_DEPTS) {
-    try {
-      sc  += parseInt((await pool.query(`SELECT COUNT(*) AS c FROM ${dept}.schedules WHERE is_break=FALSE`)).rows[0].c);
-      ssc += parseInt((await pool.query(`SELECT COUNT(*) AS c FROM ${dept}.student_schedules WHERE is_break=FALSE`)).rows[0].c);
-      ic  += parseInt((await pool.query(`SELECT COUNT(*) AS c FROM ${dept}.instructors`)).rows[0].c);
-    } catch (_) {}
-  }
-  const dc = parseInt((await pool.query("SELECT COUNT(*) AS c FROM departments")).rows[0].c);
+  const sc  = parseInt((await pool.query(`SELECT COUNT(*) AS c FROM schedules WHERE is_break=FALSE`)).rows[0].c);
+  const ssc = parseInt((await pool.query(`SELECT COUNT(*) AS c FROM student_schedules WHERE is_break=FALSE`)).rows[0].c);
+  const ic  = parseInt((await pool.query(`SELECT COUNT(*) AS c FROM instructors`)).rows[0].c);
+  const dc  = parseInt((await pool.query("SELECT COUNT(*) AS c FROM departments")).rows[0].c);
   app.listen(5000, () => {
     console.log("SmartSched backend running on http://localhost:5000");
     console.log(`Departments: ${dc} | Instructors: ${ic} | Instructor blocks: ${sc} | Student blocks: ${ssc}`);

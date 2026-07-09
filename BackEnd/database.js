@@ -4,9 +4,9 @@ const { Pool } = require("pg");
 const pool = new Pool({
   host:     process.env.DB_HOST     || "localhost",
   port:     parseInt(process.env.DB_PORT) || 5432,
-  user:     process.env.DB_USER     || "smartsched_user",
+  user:     process.env.DB_USER     || "postgres",
   password: process.env.DB_PASSWORD || "SmartSched2025!",
-  database: process.env.DB_NAME     || "smartsched",
+  database: process.env.DB_NAME     || "postgres",
 });
 
 const CAPACITY = {
