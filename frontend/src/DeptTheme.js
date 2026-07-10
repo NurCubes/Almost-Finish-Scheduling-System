@@ -4,8 +4,8 @@
 export const DEPT_THEMES = {
   BSIT: {
     code: "BSIT",
-    name: "Bachelor of Science in Information Technology",
-    shortName: "Information Technology",
+    name: "Bachelor of Science in Information and Communication Technology",
+    shortName: "Information and Communication Technology",
     logo: "IT.png",
     primary:   "#800000",
     primary2:  "#a00000",
@@ -26,8 +26,8 @@ export const DEPT_THEMES = {
   },
   CRIM: {
     code: "CRIM",
-    name: "Bachelor of Science in Criminology",
-    shortName: "Criminology",
+    name: "Bachelor of Science in Criminal Justice",
+    shortName: "Criminolal Justice",
     logo: "CRIM",
     primary:   "#b91c1c",
     primary2:  "#dc2626",

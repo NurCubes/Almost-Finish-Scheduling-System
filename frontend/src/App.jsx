@@ -16,16 +16,73 @@ const ALL_ROOMS     = [...LECTURE_ROOMS, ...LAB_ROOMS];
 const LUNCH_START   = 12;
 const LUNCH_END     = 13;
 const BREAK_TRIGGER = 3;
-const BREAK_DUR     = 1;
-
+const BREAK_DUR     = 0.5;
 const SEMESTERS = ["1st Semester", "2nd Semester"];
-
 const YEAR_LEVEL_LABELS = {
   1: "First Year",
   2: "Second Year",
   3: "Third Year",
   4: "Fourth Year",
 };
+
+
+
+// Fixed row height (px) used ONLY by the printed schedule tables. Printed
+// tables merge multi-slot classes into one <td> via rowSpan; without a fixed
+// height, the browser sizes each row off that cell's content, which desyncs
+// the Time column from the grid once a block has enough text to need more
+// room than a bare time-slot row would. Locking every row — and every
+// rowSpan cell to an exact multiple of this value — keeps the grid perfectly
+// rectangular no matter how many/how busy the blocks are.
+const PRINT_ROW_H = 46;
+
+function printCellBox(rowSpan = 1, extra = {}) {
+  return {
+    height: PRINT_ROW_H * rowSpan,
+    minHeight: PRINT_ROW_H * rowSpan,
+    maxHeight: PRINT_ROW_H * rowSpan,
+
+    overflow: "hidden",
+    boxSizing: "border-box",
+
+    verticalAlign: "top",
+    display: "table-cell",
+
+    ...extra,
+  };
+}
+
+const PRINT_TIME_CELL = {
+  width: 105,
+  minWidth: 105,
+  maxWidth: 105,
+
+  height: PRINT_ROW_H,
+  minHeight: PRINT_ROW_H,
+  maxHeight: PRINT_ROW_H,
+
+  padding: "0 8px",
+
+  whiteSpace: "nowrap",
+
+  overflow: "hidden",
+
+  textAlign: "center",
+
+  verticalAlign: "middle",
+
+  fontSize: 10,
+
+  fontWeight: 700,
+
+  boxSizing: "border-box",
+};
+
+
+
+
+
+
 
 // ── Random subject icons pool ──
 const SUBJECT_ICONS = ["📐","📊","🔭","🧬","🖥️","📡","⚙️","🧮","📝","🔬","💡","🗂️","🌐","🎯","📈","🔢","🧩","📚","🛠️","🔐","💻","🏗️","🧪","📋","🗃️"];
@@ -372,6 +429,42 @@ function trimRun(setGrid, day, t, oldSteps, newSteps) {
   });
 }
 
+// Moves a pending (not-yet-saved) grid entry from its current day/time to a
+// suggested day/time/room — used when a user clicks a ConflictToast
+// suggestion while still on the Instructor Load / Student Load entry screen,
+// before the block has been saved to the database (and so has no id yet,
+// meaning the DB-patching handleLinkedMove path used by drag-and-drop can't
+// be used). This gives the "click to apply" button in these two toasts the
+// same immediate, visible effect that dragging a block already has.
+function moveGridBlock(setGridFn, block, suggestion, extraFields = {}) {
+  const duration = +(block.end - block.start).toFixed(1);
+  const newDay   = suggestion.day || block.day;
+  const newStart = suggestion.start !== undefined ? Number(suggestion.start) : block.start;
+  const newEnd   = suggestion.end   !== undefined ? Number(suggestion.end)   : +(newStart + duration).toFixed(1);
+  const newRoom  = suggestion.room || block.room;
+
+  setGridFn(prev => {
+    const next = { ...prev };
+
+    const oldDayGrid = { ...(next[block.day] || {}) };
+    for (let t = block.start; t < block.end; t = +(t + TIME_STEP).toFixed(1)) {
+      delete oldDayGrid[t];
+    }
+    next[block.day] = oldDayGrid;
+
+    const newDayGrid = { ...(next[newDay] || {}) };
+    for (let t = newStart; t < newEnd; t = +(t + TIME_STEP).toFixed(1)) {
+      newDayGrid[t] = {
+        subject: block.subject,
+        room: newRoom,
+        roomType: getRoomType(newRoom),
+        ...extraFields,
+      };
+    }
+    next[newDay] = newDayGrid;
+    return next;
+  });
+}
 
 
 
@@ -447,6 +540,121 @@ function getBadgeBg(type, theme) {
   if (type === "GE") return "linear-gradient(135deg,#65a30d,#84cc16)";
   return `linear-gradient(135deg,${theme.primary},${theme.primary3||theme.primary})`;
 }
+
+// ── SUBJECT COLOR SYSTEM ──
+// Every subject gets a stable color derived from a hash of its name, so it's
+// consistent everywhere (grid, print, room view) without any manual setup.
+// Major subjects get a dominant/saturated fill; GE subjects get a lighter
+// pastel version of the SAME hue. Lab vs Lecture is folded into the same
+// color family — lab = deeper fill, lecture = lighter tint.
+// A palette of 32 hues spaced by the golden angle (137.508°) around the
+// color wheel. This spreads hues far more evenly than a straight hue % 360,
+// so even subjects whose names hash to nearby numbers still land on
+// visually distinct colors instead of two shades of the same color.
+// ── SUBJECT COLOR SYSTEM v2 ──
+// A small, curated set of muted hues instead of the full color wheel at
+// high saturation. Subjects still get a stable, distinct color, but the
+// palette reads as one coherent document instead of a rainbow — solid
+// badges instead of gradients, near-white cell tints, and low saturation
+// throughout so it holds up in print as well as on screen.
+const PROFESSIONAL_HUES = [210, 173, 262, 15, 38, 340, 152, 282, 25, 199, 318, 48, 235, 95];
+
+function hashHue(name) {
+  let hash = 0;
+  const s = (name || "").trim().toLowerCase();
+  for (let i = 0; i < s.length; i++) hash = s.charCodeAt(i) + ((hash << 5) - hash);
+  const idx = Math.abs(hash) % PROFESSIONAL_HUES.length;
+  return PROFESSIONAL_HUES[idx];
+}
+
+function getSubjectColor(subjectName, type, roomType) {
+  const hue   = hashHue(subjectName || "Unknown");
+  const isGE  = type === "GE";
+  const isLab = roomType === "Laboratory";
+
+  // Badge — solid muted fill, dark enough for white text. GE sits a touch
+  // lighter/less saturated so it visually reads as the secondary category.
+  const badgeSat   = isGE ? 30 : 40;
+  const badgeLight = isLab ? 28 : 34;
+  const badgeBg = `hsl(${hue}, ${badgeSat}%, ${badgeLight}%)`;
+
+  // Cell background — near-white tint, just enough separation without
+  // fighting the block's text.
+  const cellSat     = 28;
+  const cellLight   = 95;
+  const cellBg      = `hsl(${hue}, ${cellSat}%, ${cellLight}%)`;
+  const cellBorder  = `hsl(${hue}, ${cellSat + 12}%, 74%)`;
+  const accentColor = `hsl(${hue}, ${badgeSat + 10}%, 30%)`;
+
+  return { hue, badgeBg, cellBg, cellBorder, accentColor };
+}
+
+// Small color-key strip shown above a schedule output so viewers can match
+// subject → color at a glance.
+function SubjectColorLegend({ blocks, codeMap }) {
+  const real = (blocks || []).filter(b => !b.is_break && b.subject);
+  const seen = new Map();
+  real.forEach(b => {
+    const { code, name, type } = resolveSubjectDisplay(b, codeMap);
+    const key = normName(b.subject);
+    if (!seen.has(key)) seen.set(key, { code, name, type, roomType: b.roomType });
+  });
+  const entries = [...seen.values()].sort((a, b) => (a.code || a.name).localeCompare(b.code || b.name));
+  if (!entries.length) return null;
+  return (
+    <div style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center", padding: "12px 16px", background: "#f8fafc", border: "1px solid #e2e8f0", borderRadius: 10 }}>
+      <span style={{ fontSize: 12, fontWeight: 700, color: "#64748b", marginRight: 2 }}>🎨 Subject Colors:</span>
+      {entries.map((e, i) => {
+        const c = getSubjectColor(e.name, e.type, e.roomType);
+        return (
+          <span key={i} style={{ display: "inline-flex", alignItems: "center", gap: 6, padding: "3px 10px 3px 4px", borderRadius: 20, background: "#fff", border: `1px solid ${c.cellBorder}` }}>
+            <span style={{ width: 15, height: 15, borderRadius: "50%", background: c.badgeBg, display: "inline-block", flexShrink: 0 }} />
+            <span style={{ fontSize: 11, fontWeight: 700, color: "#334155" }}>{e.code || e.name}</span>
+            <span style={{ fontSize: 9, fontWeight: 700, color: e.type === "GE" ? "#4d7c0f" : "#64748b" }}>{e.type === "GE" ? "GE" : "Major"}</span>
+          </span>
+        );
+      })}
+    </div>
+  );
+}
+
+// ── EDIT NAMES/TITLES HERE — shown at the bottom of every printed schedule ──
+const SIGNATORIES = {
+  notedBy:    { name: "MYLEN B. PADERES", title: "Dean SOICT" },
+  approvedBy: { name: "HEIDI A. PAMA",       title: "Academic Coordinator" },
+};
+
+function SignatureBlock() {
+  return (
+    <div style={{ display: "flex", justifyContent: "space-between", marginTop: 34, paddingTop: 4 }}>
+      <div style={{ textAlign: "center", width: "45%" }}>
+        <div style={{ fontSize: 10.5, color: "#475569", marginBottom: 26 }}>Noted by:</div>
+        <div style={{ borderTop: "1px solid #000", paddingTop: 5, fontSize: 25, fontWeight: 800, textTransform: "uppercase" }}>
+          {SIGNATORIES.notedBy.name}
+        </div>
+        <div style={{ fontSize: 20, color: "#475569" }}>{SIGNATORIES.notedBy.title}</div>
+      </div>
+      <div style={{ textAlign: "center", width: "45%" }}>
+        <div style={{ fontSize: 10.5, color: "#475569", marginBottom: 26 }}>Approved by:</div>
+        <div style={{ borderTop: "1px solid #000", paddingTop: 5, fontSize: 25, fontWeight: 800, textTransform: "uppercase" }}>
+          {SIGNATORIES.approvedBy.name}
+        </div>
+        <div style={{ fontSize: 20, color: "#475569" }}>{SIGNATORIES.approvedBy.title}</div>
+      </div>
+    </div>
+  );
+}
+
+
+
+
+
+
+
+
+
+
+
 
 /* ════════
    SUBJECT BLOCK CARD
@@ -569,11 +777,11 @@ function SchoolHeader({ academicYear, semester, compact=false, theme }) {
   return (
     <div style={{display:"flex",justifyContent:"center",padding:compact?"12px 0 10px":"16px 0 14px",borderBottom:`2px solid ${theme.border}`,marginBottom:compact?12:16}}>
       <div style={{display:"flex",alignItems:"center",gap:compact?12:16,maxWidth:520}}>
-        <DeptLogo code={theme.code} style={{width:compact?44:52,height:compact?44:52,objectFit:"contain",flexShrink:0}} alt={theme.code}/>
+        <DeptLogo code={theme.code} style={{ width: 68, height: 68, objectFit: "contain", flexShrink: 0 }} alt={theme.code}/>
         <div style={{textAlign:"center"}}>
-          <div style={{fontSize:compact?15:17,fontWeight:800,color:"#0f172a",letterSpacing:.3}}>PASSI CITY COLLEGE</div>
-          <div style={{fontSize:compact?11:12,fontWeight:700,color:theme.primary,marginTop:2}}>{theme.shortName}</div>
-          <div style={{fontSize:compact?9:10,color:"#64748b",marginTop:1}}>Barangay Bacuranan, Passi City, Iloilo</div>
+          <div style={{ fontSize: 23, fontWeight: 900, textTransform: "uppercase" }}>Passi City College</div>
+<div style={{ fontSize: 15, fontWeight: 700, color: theme.primary, marginTop: 3 }}>{theme.shortName}</div>
+<div style={{ fontSize: 11, color: "#555", marginTop: 2 }}>Barangay Bacuranan, Passi City, Iloilo</div>
           {(academicYear || semester) && (
             <div style={{display:"flex",gap:6,justifyContent:"center",marginTop:5,flexWrap:"wrap"}}>
               {academicYear && (
@@ -585,7 +793,7 @@ function SchoolHeader({ academicYear, semester, compact=false, theme }) {
             </div>
           )}
         </div>
-        <img src={PCCLogo} style={{width:compact?44:52,height:compact?44:52,objectFit:"contain",flexShrink:0}} alt="PCC"/>
+       <img src={PCCLogo} style={{ width: 68, height: 68, objectFit: "contain", flexShrink: 0 }} alt="PCC"/>
       </div>
     </div>
   );
@@ -777,10 +985,14 @@ function StudentWeeklyGrid({ grid, setGrid, theme, activeSemester }) {
     });
   };
 
+  const assignedInstructorList = instructorList.filter(
+    i => (assignedSubjects[normName(i.name)] || []).length > 0
+  );
+
   const InstructorSelect = ({ value, onChange, style }) => (
     <select style={style} value={value} onChange={onChange}>
       <option value="">— Instructor —</option>
-      {instructorList.map(i => (
+      {assignedInstructorList.map(i => (
         <option key={i.id} value={i.name}>{i.name}</option>
       ))}
     </select>
@@ -806,7 +1018,7 @@ function StudentWeeklyGrid({ grid, setGrid, theme, activeSemester }) {
               const majorSubjects = subsList.filter(s => s.subject_type === "Major");
               return (
                 <td key={day} style={{padding:"5px 6px",border:`1px solid ${theme.light2}`,verticalAlign:"top",background:sub?(lab?theme.light2:theme.light):"transparent"}}>
-                  {instructorList.length > 0
+                 {assignedInstructorList.length > 0
                     ? <InstructorSelect value={inst} onChange={e => upd(day, t, "instructor", e.target.value)} style={{width:"100%",padding:"4px 6px",border:`1px solid ${theme.border}`,borderRadius:4,fontSize:11,fontWeight:600,boxSizing:"border-box",marginBottom:4,color:inst?theme.primary:"#94a3b8",background:"#fff"}}/>
                     : <input style={{width:"100%",padding:"5px 7px",border:`1px solid ${theme.border}`,borderRadius:4,fontSize:11,color:theme.primary,fontWeight:600,marginBottom:4,boxSizing:"border-box"}} value={inst} placeholder="Instructor" onChange={e => upd(day, t, "instructor", e.target.value)}/>
                   }
@@ -878,7 +1090,6 @@ function PrintModal({ schedules, academicYear, semester, onClose, theme, codeMap
   const handlePrint=async()=>{
     setPrinting(true);
     const win=window.open("","_blank");
- win.document.write(`<!DOCTYPE html><html><head><title>Faculty Class Schedule</title><style>*{box-sizing:border-box;margin:0;padding:0;}body{font-family:Arial,sans-serif;font-size:10pt;color:#000;background:#fff;}.page{width:297mm;padding:14mm 14mm 14mm 18mm;margin:0 auto;}table{width:100%;border-collapse:collapse;table-layout:fixed;}th:first-child,td:first-child{width:80px;}th{background:${theme.primary};color:#fff;font-weight:bold;padding:6px 4px;text-align:center;border:1px solid ${theme.primary3};font-size:8pt;}td{border:1px solid #ddd;padding:4px;text-align:center;vertical-align:middle;height:36px;}.td-lab{background:${theme.light2};}.td-lec{background:${theme.light};}.td-break{background:#fef9c3;}.time-td{background:${theme.light};color:${theme.primary};font-weight:700;font-size:7.5pt;white-space:nowrap;}tr,div[style*="page-break"]{page-break-inside:avoid;}thead{display:table-header-group;}@media print{@page{margin:10mm;size:A4 landscape;}body{-webkit-print-color-adjust:exact;print-color-adjust:exact;}}</style></head><body><div class="page">${ref.current.innerHTML}</div></body></html>`);
     win.document.close(); win.focus();
     setTimeout(()=>{win.print();win.close();setPrinting(false);},700);
   };
@@ -1103,7 +1314,15 @@ function RoomPrintModal({ room, blocks, academicYear, semester, onClose, theme, 
   const ref = useRef();
   const [printing, setPrinting] = useState(false);
   const isLab = LAB_ROOMS.includes(room);
-  const timeSlots = buildPrintTimeSlots(blocks);
+
+  // Insert breaks per day (was missing — only lunch was ever carved out here)
+  const cls = DAYS.flatMap(day => {
+    const dayBlocks = blocks
+      .filter(b => b.day === day && !b.is_break)
+      .map(b => ({ ...b, start: Number(b.start), end: Number(b.end) }));
+    return dayBlocks.length ? insertBreaks(dayBlocks) : [];
+  });
+  const timeSlots = buildPrintTimeSlots(cls);
 
   const handlePrint = () => {
     setPrinting(true);
@@ -1165,8 +1384,10 @@ function RoomPrintModal({ room, blocks, academicYear, semester, onClose, theme, 
                   <tr key={t}>
                     <td style={{background:theme.light,border:"1px solid #ddd",padding:"3px 4px",fontWeight:700,fontSize:7.5,textAlign:"center",color:theme.primary,height:40,whiteSpace:"nowrap"}}>{fmtRange(t,nextT)}</td>
                     {DAYS.map(day => {
-                      const m = blocks.find(c=>c.day===day&&Number(c.start)<=t&&Number(c.end)>t&&!c.is_break);
-                      const lb = isLab;
+                      const m   = cls.find(c=>c.day===day&&Number(c.start)<=t&&Number(c.end)>t&&!c.is_break);
+                      const brk = cls.find(c=>c.day===day&&c.is_break&&Number(c.start)<=t&&Number(c.end)>t);
+                      const lb  = isLab;
+                      if (brk) return <td key={day} style={{border:"1px solid #ddd",textAlign:"center",height:40,background:"#fef9c3"}}><span style={{fontSize:8,color:"#854d0e",fontWeight:700}}>☕ Break</span></td>;
                       if (!m) return <td key={day} style={{border:"1px solid #ddd",height:40,background:"#fff"}}/>;
                       const { code, name, type } = resolveSubjectDisplay(m, codeMap);
                       const isGE = type === "GE";
@@ -1992,8 +2213,13 @@ function InstructorAssignmentPage({ theme, activeSemester }) {
     setLoading(false);
   }
 
-  async function handleAdd() {
+
+   async function handleAdd() {
     if (!form.instructor_id || !form.subject_id) { setErr("Please select both instructor and subject."); return; }
+    if (assignments.some(a => String(a.subject_id) === String(form.subject_id))) {
+      setErr(`This subject is already assigned to ${ownerOf(form.subject_id)}.`);
+      return;
+    }
     setSaving(true); setErr("");
     try {
       const res  = await fetch("/api/instructor-assignments", { method:"POST", credentials:"include", headers:{"Content-Type":"application/json"}, body:JSON.stringify({ ...form, semester: activeSemester }) });
@@ -2017,7 +2243,11 @@ function InstructorAssignmentPage({ theme, activeSemester }) {
   const inpStyle   = { padding:"9px 12px", border:`1.5px solid ${theme.border}`, borderRadius:8, fontSize:14, outline:"none", background:"#fff", color:"#0f172a", width:"100%", boxSizing:"border-box" };
   const btnPrimary = { padding:"10px 22px", background:theme.primary, color:"#fff", border:"none", borderRadius:8, cursor:"pointer", fontSize:14, fontWeight:600 };
 
-  const alreadyAssigned = new Set(assignments.filter(a=>String(a.instructor_id)===form.instructor_id).map(a=>String(a.subject_id)));
+  const alreadyAssigned = new Set(assignments.map(a => String(a.subject_id)));
+
+  function ownerOf(subjectId) {
+    return assignments.find(a => String(a.subject_id) === String(subjectId))?.instructor_name || "another instructor";
+  }
   const subjectsByYear = [1,2,3,4].reduce((acc,y)=>{const ge=subjects.filter(s=>s.year_level===y&&s.subject_type==="GE"),major=subjects.filter(s=>s.year_level===y&&s.subject_type==="Major");if(ge.length||major.length)acc[y]={ge,major};return acc;},{});
 
   function getInstGroup(instId) {
@@ -2079,10 +2309,10 @@ function InstructorAssignmentPage({ theme, activeSemester }) {
                 const majorAvail=major.filter(s=>!alreadyAssigned.has(String(s.id))),majorUsed=major.filter(s=>alreadyAssigned.has(String(s.id)));
                 if(!geAvail.length&&!geUsed.length&&!majorAvail.length&&!majorUsed.length)return null;
                 return <optgroup key={yr} label={`── Year ${yr} ──`}>
-                  {geAvail.map(s=><option key={s.id} value={s.id}>🌐 {s.subject_code?`[${s.subject_code}] `:""}{s.subject_name} (GE)</option>)}
-                  {geUsed.map(s=><option key={s.id} value={s.id} disabled>✓ {s.subject_name} (GE — already assigned)</option>)}
+                 {geAvail.map(s=><option key={s.id} value={s.id}>🌐 {s.subject_code?`[${s.subject_code}] `:""}{s.subject_name} (GE)</option>)}
+                  {geUsed.map(s=><option key={s.id} value={s.id} disabled>✓ {s.subject_name} (GE — assigned to {ownerOf(s.id)})</option>)}
                   {majorAvail.map(s=><option key={s.id} value={s.id}>🎯 {s.subject_code?`[${s.subject_code}] `:""}{s.subject_name} (Major)</option>)}
-                  {majorUsed.map(s=><option key={s.id} value={s.id} disabled>✓ {s.subject_name} (Major — already assigned)</option>)}
+                  {majorUsed.map(s=><option key={s.id} value={s.id} disabled>✓ {s.subject_name} (Major — assigned to {ownerOf(s.id)})</option>)}
                 </optgroup>;
               })}
             </select>
@@ -2238,6 +2468,33 @@ function Sidebar({ activePage, setActivePage, theme, previewDept, setPreviewDept
 
 /* ════════ PAGE CONTENT ════════ */
 /* ════════ DRAG-DROP INLINE SCHEDULE GRID — FACULTY ════════ */
+/* ════════════════════════════════════════════════════════════════
+   InlineScheduleGrid — FACULTY PRINT FIX v3 (single page, no split)
+   ════════════════════════════════════════════════════════════════
+   WHAT WENT WRONG IN v2:
+   v2 introduced a MIN_SCALE floor (0.78) meaning "never shrink past
+   this point — if the schedule still doesn't fit, let it flow onto a
+   second printed page instead of over-compressing." For a bulky
+   schedule (Sat classes + full week + lunch), that floor got hit, so
+   the table split into two separate pages: the header repeated, a
+   visual gap appeared between them, and it read as "cut in half."
+   That's not what you asked for — you want it ALL on one page.
+
+   THE FIX IN v3:
+   - No more MIN_SCALE "give up and paginate" logic. fitAll() now
+     always computes a scale that makes the ENTIRE table fit on one
+     printed page, however small that requires — down to a tiny safety
+     epsilon (0.15) that only exists to prevent a literal divide-by-zero
+     or NaN, not to trigger a second page.
+   - The scale is still computed against a fixed, reliable reference
+     height (not the flaky wrap.clientHeight that caused the original
+     collapse bug), so it can't blow up into the "5000% width" disaster
+     from before.
+   - <colgroup> still locks Time + 7 day columns to stable relative
+     widths, so the scale transform shrinks everything uniformly —
+     nothing drifts out of alignment, no matter how small the scale.
+   - Only faculty (InlineScheduleGrid) touched, as before.
+   ════════════════════════════════════════════════════════════════ */
 function InlineScheduleGrid({ schedules, allSchedules, academicYear, semester, onMoveBlock, onCheckMove, theme, codeMap, instructorPool = [] }) {
   const [dragBlock, setDragBlock] = useState(null);
   const [dragOver, setDragOver]   = useState(null);
@@ -2248,7 +2505,7 @@ function InlineScheduleGrid({ schedules, allSchedules, academicYear, semester, o
   const real = schedules.filter(s => !s.is_break);
   const instructors = [...new Set(real.filter(s => s.instructor?.trim()).map(s => s.instructor))].sort();
 
-  // ── MODIFIED: default every instructor to collapsed (moved AFTER `instructors` is declared) ──
+  // ── default every instructor to collapsed (moved AFTER `instructors` is declared) ──
   useEffect(() => {
     setCollapsed(prev => {
       const next = { ...prev };
@@ -2258,81 +2515,246 @@ function InlineScheduleGrid({ schedules, allSchedules, academicYear, semester, o
     });
   }, [instructors.join("|")]);
 
-
-
-
-const handlePrint = () => {
+  const handlePrint = () => {
   const win = window.open("", "_blank");
   const pages = instructors
     .map(inst => document.getElementById(`inline-faculty-print-${inst}`)?.innerHTML || "")
     .filter(Boolean);
 
-  const pagesHtml = pages
-    .map((html, i) => `
-      <div class="print-page" id="printPage${i}">
-        <div class="print-inner" id="printInner${i}">${html}</div>
-      </div>
-    `).join("");
+  if (!win || !pages.length) {
+    if (win) win.close();
+    return;
+  }
 
-  win.document.write(`<!DOCTYPE html><html><head><title>Faculty Class Schedule</title><style>
-*{box-sizing:border-box;margin:0;padding:0;}
-body{font-family:Arial,sans-serif;font-size:10pt;color:#000;background:#fff;}
-.print-page{
-  width:281mm;
-  height:194mm;      /* A4 landscape minus margins */
-  overflow:hidden;
-  position:relative;
-  page-break-after:always;
+  const pagesHtml = pages
+    .map((content, index) => `
+      <section class="print-page">
+        <div class="print-inner" id="printInner${index}">${content}</div>
+      </section>
+    `)
+    .join("");
+
+  win.document.write(`<!DOCTYPE html>
+<html>
+  <head>
+    <title>Faculty Class Schedule</title>
+    <style>
+   :root {
+  --page-width: 12.5in;
+  --page-height: 8in;
+  --time-column: 2in;
 }
-.print-page:last-child{page-break-after:auto;}
-.print-inner{ transform-origin: top left; }
-table{width:100%;border-collapse:collapse;table-layout:fixed;}
-th:first-child,td:first-child{width:80px;}
-th{background:${theme.primary};color:#fff;font-weight:bold;padding:6px 4px;text-align:center;border:1px solid ${theme.primary3||theme.primary};font-size:8pt;}
-td{border:1px solid #ddd;padding:4px;text-align:center;vertical-align:middle;height:36px;}
-thead{display:table-header-group;}
-@media print{@page{margin:8mm;size:A4 landscape;}body{-webkit-print-color-adjust:exact;print-color-adjust:exact;}}
-</style></head><body>
-${pagesHtml}
-<script>
-  function fitAll() {
-    var pages = document.querySelectorAll('.print-page');
-    pages.forEach(function(outer, i) {
-      var inner = document.getElementById('printInner' + i);
-      var availH = outer.clientHeight;
-      var naturalH = inner.scrollHeight;
-      if (naturalH > availH) {
-        var scale = (availH / naturalH) * 0.98;
-        inner.style.transform = 'scale(' + scale + ')';
-        inner.style.width = (100 / scale) + '%';
+
+      * { box-sizing: border-box; margin: 0; padding: 0; }
+      html, body { width: var(--page-width); min-height: var(--page-height); }
+      body { font-family: Arial, sans-serif; font-size: 10pt; color: #000; background: #fff; }
+
+      .print-page {
+        width: var(--page-width);
+        height: var(--page-height);
+        overflow: hidden;
+        position: relative;
+        break-after: page;
+        page-break-after: always;
       }
-    });
-    setTimeout(function () { window.print(); window.close(); }, 150);
-  }
-  var imgs = Array.prototype.slice.call(document.images);
-  var pending = imgs.filter(function (img) { return !img.complete; }).length;
-  if (pending === 0) {
-    fitAll();
-  } else {
-    var done = 0;
-    imgs.forEach(function (img) {
-      img.addEventListener('load', check);
-      img.addEventListener('error', check);
-    });
-    function check() { done++; if (done >= pending) fitAll(); }
-    setTimeout(fitAll, 2000);
-  }
-</script>
-</body></html>`);
-  win.document.close(); win.focus();
+
+      .print-page:last-child {
+        break-after: auto;
+        page-break-after: auto;
+      }
+
+      .print-inner {
+        width: 100%;
+        transform-origin: top left;
+      }
+
+      /* Keep the time column and seven weekday columns at fixed, stable widths. */
+      .faculty-print-table > table {
+        width: 100% !important;
+        border-collapse: collapse;
+        table-layout: fixed !important;
+      }
+
+      .faculty-print-table > table col:first-child {
+        width: var(--time-column) !important;
+      }
+
+      .faculty-print-table > table col:not(:first-child) {
+        width: calc((100% - var(--time-column)) / 7) !important;
+      }
+
+      .faculty-print-table > table th:first-child,
+      .faculty-print-table > table td:first-child {
+        width: var(--time-column) !important;
+        min-width: var(--time-column) !important;
+        max-width: var(--time-column) !important;
+        white-space: nowrap !important;
+      }
+
+      .faculty-print-table > table tr,
+      .faculty-print-table > table td,
+      .faculty-print-table > table th {
+        break-inside: avoid;
+        page-break-inside: avoid;
+      }
+
+      .faculty-print-table > table thead { display: table-header-group; }
+
+
+/* Shrink the logo row — it was still rendering at full inline size
+         (82px logos, 24px title) and eating most of the fixed page height,
+         starving the grid below and forcing it to scale down too far. */
+      .faculty-print-header > div:first-child {
+        padding-bottom: 6px !important;
+        margin-bottom: 6px !important;
+      }
+      .faculty-print-header > div:first-child > div {
+        gap: 10px !important;
+      }
+      .faculty-print-header > div:first-child img {
+        width: 50px !important;
+        height: 50px !important;
+      }
+      .faculty-print-header > div:first-child > div > div:nth-child(2) > div:nth-child(1) {
+        font-size: 16px !important;
+      }
+      .faculty-print-header > div:first-child > div > div:nth-child(2) > div:nth-child(2) {
+        font-size: 13px !important;
+        margin-top: 1px !important;
+      }
+      .faculty-print-header > div:first-child > div > div:nth-child(2) > div:nth-child(3) {
+        font-size: 12px !important;
+        margin-top: 1px !important;
+      }
+
+      /* Make the printable faculty header comfortably readable on long paper. */
+      .faculty-print-header > div:nth-child(2) {
+        font-size: 16px !important;
+        margin: 10px 0 7px !important;
+      }
+
+
+
+
+
+
+      /* Make the printable faculty header comfortably readable on long paper. */
+      .faculty-print-header > div:nth-child(2) {
+        font-size: 13px !important;
+        margin: 10px 0 7px !important;
+      }
+
+      .faculty-print-header > div:nth-child(3) {
+        font-size: 12px !important;
+        margin-bottom: 10px !important;
+      }
+
+      .faculty-print-header > div:last-child {
+        font-size: 12px !important;
+        padding: 12px 20px !important;
+        margin-bottom: 12px !important;
+        gap: 28px !important;
+      }
+
+      @page { size: 13in 8.5in; margin: 0.25in; }
+
+      @media print {
+        html, body { width: var(--page-width); min-height: var(--page-height); }
+        body { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+        .print-page {
+          width: var(--page-width);
+          height: var(--page-height);
+          overflow: hidden;
+          break-after: page;
+          page-break-after: always;
+        }
+        .print-page:last-child {
+          break-after: auto;
+          page-break-after: auto;
+        }
+      }
+    </style>
+  </head>
+  <body>${pagesHtml}
+    <script>
+      (function () {
+        var printed = false;
+
+       function fitWholePage() {
+  var pages = document.querySelectorAll(".print-page");
+
+  pages.forEach(function (outer) {
+    var inner = outer.querySelector(".print-inner");
+    if (!inner) return;
+
+    var header = inner.querySelector(".faculty-print-header");
+    var tableWrap = inner.querySelector(".faculty-print-table");
+    if (!header || !tableWrap) return;
+
+    // Reset before measuring so header keeps its natural, fixed size always.
+    tableWrap.style.width = "100%";
+    tableWrap.style.transform = "none";
+
+    // Only the table area scales — it gets whatever height is left
+    // after the header, which is never touched.
+    var availableHeight = outer.clientHeight - header.offsetHeight;
+    var widthScale  = outer.clientWidth / tableWrap.scrollWidth;
+    var heightScale = availableHeight / tableWrap.scrollHeight;
+    var scale = Math.min(1, widthScale, heightScale);
+
+    if (scale > 0 && isFinite(scale) && scale < 1) {
+      tableWrap.style.width = (100 / scale) + "%";
+      tableWrap.style.transform = "scale(" + scale + ")";
+      tableWrap.style.transformOrigin = "top left";
+    }
+  });
+}
+
+        function printOnce() {
+          if (printed) return;
+          printed = true;
+          fitWholePage();
+          setTimeout(function () { window.print(); window.close(); }, 150);
+        }
+
+        var images = Array.prototype.slice.call(document.images);
+        var pending = images.filter(function (image) { return !image.complete; }).length;
+
+        if (!pending) {
+          requestAnimationFrame(printOnce);
+          return;
+        }
+
+        var finished = 0;
+        function imageDone() {
+          finished += 1;
+          if (finished >= pending) printOnce();
+        }
+
+        images.forEach(function (image) {
+          image.addEventListener("load", imageDone, { once: true });
+          image.addEventListener("error", imageDone, { once: true });
+        });
+
+        // Do not let a broken or remote logo prevent printing.
+        setTimeout(printOnce, 2000);
+      }());
+    </scr${"ipt"}>
+    </scr${"ipt"}>
+  </body>
+</html>`);
+
+  win.document.close();
+  win.focus();
 };
+
 
   const handleDragStart = (e, block) => {
     setDragBlock(block);
     e.dataTransfer.effectAllowed = "move";
   };
 
-const handleDrop = async (e, day, time, instructor) => {
+  const handleDrop = async (e, day, time, instructor) => {
     e.preventDefault();
     if (!dragBlock) return;
     if (normName(dragBlock.instructor) !== normName(instructor)) { setDragOver(null); setDragBlock(null); return; }
@@ -2343,10 +2765,7 @@ const handleDrop = async (e, day, time, instructor) => {
     if (!(newStart < newEnd)) { setDragBlock(null); return; }
     if (newStart === dragBlock.start && day === dragBlock.day) { setDragBlock(null); return; }
 
-    // Link-aware conflict check: this excludes the dragged block's linked
-    // twin (instructor/student pair) from the comparison, so a class can
-    // never be flagged as conflicting with itself.
-  const target = { day, start: newStart, end: newEnd, room: dragBlock.room };
+    const target = { day, start: newStart, end: newEnd, room: dragBlock.room };
     const { conflicts, moved, others } = onCheckMove(dragBlock, target);
 
     if (conflicts.length > 0) {
@@ -2359,7 +2778,6 @@ const handleDrop = async (e, day, time, instructor) => {
       return;
     }
 
-    // No conflicts — save
     await onMoveBlock(dragBlock, target);
     setDragBlock(null);
   };
@@ -2370,25 +2788,29 @@ const handleDrop = async (e, day, time, instructor) => {
     setDragOver({ day, time });
   };
 
+  // Printable rows use the AM/PM section headings, so keep each time range compact.
+  const formatPrintTime = (start, end) =>
+    fmtRange(start, end).replace(/\s(?:AM|PM)\b/gi, "");
+
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 0 }}>
       {/* Toast */}
-     {toast && (
+      {toast && (
         <ConflictToast
           conflicts={toast.conflicts}
           allSchedules={allSchedules}
           onClose={() => setToast(null)}
-       onMoveSchedule={async (block, sg) => {
-  const target = toast?.movedBlock || block;
-  const targetRoom  = sg.room || target.room;
-  const targetStart = Number(sg.start);
-  const targetEnd   = Number(sg.end);
-  if (!targetRoom || targetStart === undefined || targetEnd === undefined || targetStart >= targetEnd) return;
-  const payload = { day: sg.day, start: targetStart, end: targetEnd, room: targetRoom };
-  if (sg.instructor) payload.instructor = sg.instructor;
-  await onMoveBlock(target, payload);
-  setToast(null);
-}}
+          onMoveSchedule={async (block, sg) => {
+            const target = toast?.movedBlock || block;
+            const targetRoom  = sg.room || target.room;
+            const targetStart = Number(sg.start);
+            const targetEnd   = Number(sg.end);
+            if (!targetRoom || targetStart === undefined || targetEnd === undefined || targetStart >= targetEnd) return;
+            const payload = { day: sg.day, start: targetStart, end: targetEnd, room: targetRoom };
+            if (sg.instructor) payload.instructor = sg.instructor;
+            await onMoveBlock(target, payload);
+            setToast(null);
+          }}
           instructorPool={instructorPool}
         />
       )}
@@ -2405,14 +2827,17 @@ const handleDrop = async (e, day, time, instructor) => {
         />
       )}
 
-      {/* Print button row */}
-      <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: 12 }}>
-        <button
-          onClick={handlePrint}
-          style={{ padding: "9px 22px", background: theme.primary, color: "#fff", border: "none", borderRadius: 8, cursor: "pointer", fontSize: 13, fontWeight: 700, display: "flex", alignItems: "center", gap: 8 }}
-        >
-          🖨 Print / Save PDF
-        </button>
+      {/* Legend + Print button row */}
+      <div style={{ marginBottom: 12 }}>
+        <SubjectColorLegend blocks={schedules} codeMap={codeMap} />
+        <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 10 }}>
+          <button
+            onClick={handlePrint}
+            style={{ padding: "9px 22px", background: theme.primary, color: "#fff", border: "none", borderRadius: 8, cursor: "pointer", fontSize: 13, fontWeight: 700, display: "flex", alignItems: "center", gap: 8 }}
+          >
+            🖨 Print / Save PDF
+          </button>
+        </div>
       </div>
 
       {/* Printable content */}
@@ -2446,82 +2871,83 @@ const handleDrop = async (e, day, time, instructor) => {
           return (
             <div key={inst} style={{ marginBottom: 28, border: `1px solid ${theme.border}`, borderRadius: 10, overflow: "hidden" }}>
               {/* Instructor header */}
-            <div
-  style={{ background: theme.primary, color: "#fff", padding: "9px 16px", display: "flex", alignItems: "center", gap: 14, flexWrap: "wrap", cursor: "pointer", userSelect: "none" }}
-  onClick={() => setCollapsed(prev => ({ ...prev, [inst]: !prev[inst] }))}
->
-  <span style={{ fontWeight: 700, fontSize: 14 }}>👨‍🏫 {inst}</span>
-  <span style={{ fontSize: 11, opacity: 0.8 }}>⏱ {total} hrs total</span>
-  <span style={{ fontSize: 11, opacity: 0.8 }}>📖 Lecture: {lecH}h</span>
-  <span style={{ fontSize: 11, opacity: 0.8 }}>🔬 Lab: {labH}h</span>
-<span style={{ marginLeft: "auto", fontSize: 12, opacity: 0.85 }}>{collapsed[inst] ? "▶ Show" : "▼ Hide"}</span>
-</div>
+              <div
+                style={{ background: theme.primary, color: "#fff", padding: "9px 16px", display: "flex", alignItems: "center", gap: 14, flexWrap: "wrap", cursor: "pointer", userSelect: "none" }}
+                onClick={() => setCollapsed(prev => ({ ...prev, [inst]: !prev[inst] }))}
+              >
+                <span style={{ fontWeight: 700, fontSize: 14 }}>👨‍🏫 {inst}</span>
+                <span style={{ fontSize: 11, opacity: 0.8 }}>⏱ {total} hrs total</span>
+                <span style={{ fontSize: 11, opacity: 0.8 }}>📖 Lecture: {lecH}h</span>
+                <span style={{ fontSize: 11, opacity: 0.8 }}>🔬 Lab: {labH}h</span>
+                <span style={{ marginLeft: "auto", fontSize: 12, opacity: 0.85 }}>{collapsed[inst] ? "▶ Show" : "▼ Hide"}</span>
+              </div>
 
-{/* Hidden printable version — always mounted, independent of collapsed state */}
-{/* Hidden printable version — always mounted, independent of collapsed state */}
-<div id={`inline-faculty-print-${inst}`} style={{ display: "none" }}>
-  <div className="instructor-block">
-    <div style={{ display: "flex", justifyContent: "center", paddingBottom: 8, marginBottom: 8, borderBottom: "3px double #000" }}>
-      <div style={{ display: "flex", alignItems: "center", gap: 12, maxWidth: 460 }}>
-        <DeptLogo code={theme.code} style={{ width: 48, height: 48, objectFit: "contain", flexShrink: 0 }} alt={theme.code}/>
-        <div style={{ textAlign: "center" }}>
-          <div style={{ fontSize: 14, fontWeight: 900, textTransform: "uppercase" }}>Passi City College</div>
-          <div style={{ fontSize: 10, fontWeight: 700, color: theme.primary, marginTop: 2 }}>{theme.shortName}</div>
-          <div style={{ fontSize: 8, color: "#555", marginTop: 1 }}>Barangay Bacuranan, Passi City, Iloilo</div>
-        </div>
-        <img src={PCCLogo} style={{ width: 48, height: 48, objectFit: "contain", flexShrink: 0 }} alt="PCC"/>
-      </div>
-    </div>
-    <div style={{ textAlign: "center", fontWeight: "bold", fontSize: 13, textTransform: "uppercase", margin: "8px 0 4px" }}>Faculty Class Schedule — {inst}</div>
-    {academicYear && semester && <div style={{ textAlign: "center", fontSize: 10, color: theme.primary, marginBottom: 6 }}>A.Y. {academicYear} · {semester}</div>}
-    <div style={{ background: theme.primary, color: theme.light, fontSize: 8, padding: "4px 14px", marginBottom: 8, display: "flex", gap: 16, flexWrap: "wrap", borderRadius: 4 }}>
-      <span>⏱ Total: <strong style={{ color: "#fff" }}>{total} hrs</strong></span>
-      <span>📖 Lecture: <strong style={{ color: "#fff" }}>{lecH} hrs</strong></span>
-      <span>🔬 Lab: <strong style={{ color: "#fff" }}>{labH} hrs</strong></span>
-    </div>
-    <table style={{ width: "100%", borderCollapse: "collapse", tableLayout: "fixed", fontSize: 8 }}>
-      <thead><tr>
-        <th style={{ background: theme.primary3 || theme.primary, color: "#fff", border: `1px solid ${theme.primary}`, padding: "6px 4px", width: 80 }}>Time</th>
-        {DAYS.map(d => <th key={d} style={{ background: theme.primary, color: "#fff", border: `1px solid ${theme.primary3 || theme.primary}`, padding: "6px 4px" }}>{d}</th>)}
-      </tr></thead>
-      <tbody>
-        {instSlots.map(t => {
-          if (t === LUNCH_START) return (
-            <tr key="lunch">
-              <td style={{ background: "#fef9c3", border: "1px solid #ddd", padding: "3px 4px", fontWeight: 700, fontSize: 7.5, textAlign: "center", color: "#854d0e", height: 28 }}>{fmtRange(LUNCH_START, LUNCH_END)}</td>
-              {DAYS.map(day => <td key={day} style={{ border: "1px solid #ddd", textAlign: "center", height: 28, background: "#fef9c3" }}><span style={{ fontSize: 8, color: "#854d0e", fontWeight: 700 }}>🍽 Lunch</span></td>)}
-            </tr>
-          );
-          if (t > LUNCH_START && t < LUNCH_END) return null;
-          const nextT = instSlots[instSlots.indexOf(t) + 1] ?? (t + 1);
-          return (
-            <tr key={t}>
-              <td style={{ background: theme.light, border: "1px solid #ddd", padding: "3px 4px", fontWeight: 700, fontSize: 7.5, textAlign: "center", color: theme.primary, height: 36, whiteSpace: "nowrap" }}>{fmtRange(t, nextT)}</td>
-            {DAYS.map(day => {
+              {/* Hidden printable schedule — faculty header dimensions are retained. */}
+              <div id={`inline-faculty-print-${inst}`} style={{ display: "none" }}>
+                <div className="faculty-print-header">
+                <div style={{ display: "flex", justifyContent: "center", paddingBottom: 14, marginBottom: 14, borderBottom: "3px double #000" }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 24, maxWidth: 900 }}>
+                    <DeptLogo code={theme.code} style={{ width: 72, height: 72, objectFit: "contain", flexShrink: 0 }} alt={theme.code}/>
+                    <div style={{ textAlign: "center" }}>
+                      <div style={{ fontSize: 21, fontWeight: 900, textTransform: "uppercase" }}>Passi City College</div>
+                      <div style={{ fontSize: 18, fontWeight: 700, color: theme.primary, marginTop: 4 }}>{theme.shortName}</div>
+                      <div style={{ fontSize: 17, color: "#555", marginTop: 3 }}>Barangay Bacuranan, Passi City, Iloilo</div>
+                    </div>
+                    <img src={PCCLogo} style={{ width: 72, height: 72, objectFit: "contain", flexShrink: 0 }} alt="PCC"/>
+                  </div>
+                </div>
+                <div style={{ textAlign: "center", fontWeight: "bold", fontSize: 35, textTransform: "uppercase", margin: "8px 0 6px" }}>Faculty Class Schedule — {inst}</div>
+                {academicYear && semester && <div style={{ textAlign: "center", fontSize: 15, color: theme.primary, marginBottom: 8 }}>A.Y. {academicYear} · {semester}</div>}
+                <div style={{ background: theme.primary, color: theme.light, fontSize: 18, padding: "12px 20px", marginBottom: 12, display: "flex", gap: 28, flexWrap: "wrap", borderRadius: 4 }}>
+                  <span>⏱ Total: <strong style={{ color: "#fff" }}>{total} hrs</strong></span>
+                  <span>📖 Lecture: <strong style={{ color: "#fff" }}>{lecH} hrs</strong></span>
+                  <span>🔬 Lab: <strong style={{ color: "#fff" }}>{labH} hrs</strong></span>
+                </div>
+                </div>
+
+              {/* Printable table — kept in the same schedule page as the header. */}
+              <div className="faculty-print-table">
+                <table style={{ width: "100%", borderCollapse: "collapse", tableLayout: "fixed", fontSize: 22 }}>
+                  <colgroup>
+                    <col style={{ width: "250px" }} />
+                    {DAYS.map(d => <col key={d} style={{ width: "calc((100% - 250px) / 7)" }} />)}
+                  </colgroup>
+                  <thead><tr>
+                    <th style={{ background: theme.primary3 || theme.primary, color: "#fff", border: `1px solid ${theme.primary}`, padding: "10px 8px", fontSize: 20, whiteSpace: "nowrap" }}>TIME : AM</th>
+                    {DAYS.map(d => <th key={d} style={{ background: theme.primary, color: "#fff", border: `1px solid ${theme.primary3 || theme.primary}`, padding: "10px 8px", fontSize: 20 }}>{d}</th>)}
+                  </tr></thead>
+                  <tbody>
+                    {instSlots.map(t => {
+                      if (t === LUNCH_START) return [
+                        <tr key="lunch">
+  <td style={{ ...printCellBox(1), background: "#fef9c3", border: "1px solid #ddd", padding: "8px 8px", fontWeight: 700, fontSize: 20, textAlign: "center", verticalAlign: "middle", color: "#854d0e", whiteSpace: "nowrap" }}>{formatPrintTime(LUNCH_START, LUNCH_END)}</td>
+  {DAYS.map(day => <td key={day} style={{ ...printCellBox(1), border: "1px solid #ddd", textAlign: "center", verticalAlign: "middle", padding: "8px 8px", background: "#fef9c3" }}><span style={{ fontSize: 20, color: "#854d0e", fontWeight: 700 }}>🍽 Lunch</span></td>)}
+</tr>,
+                        <tr key="pm-time-heading">
+                          <th scope="row" style={{ ...printCellBox(1), background: theme.primary3 || theme.primary, color: "#fff", border: `1px solid ${theme.primary}`, padding: "4px 8px", fontWeight: 700, fontSize: 20, textAlign: "center", verticalAlign: "middle", whiteSpace: "nowrap" }}>TIME : PM</th>
+                          {DAYS.map(day => <td key={day} style={{ ...printCellBox(1), background: "#fff", border: "1px solid #ddd", padding: "4px 8px" }} />)}
+                        </tr>,
+                      ];
+                      if (t > LUNCH_START && t < LUNCH_END) return null;
+                      const nextT = instSlots[instSlots.indexOf(t) + 1] ?? (t + 1);
+                      return (
+                        <tr key={t}>
+                        <td style={{ ...printCellBox(1), background: theme.light, border: "1px solid #ddd", padding: "10px 8px", fontWeight: 700, fontSize: 18, textAlign: "center", verticalAlign: "middle", color: theme.primary, whiteSpace: "nowrap" }}>{formatPrintTime(t, nextT)}</td>
+                          {DAYS.map(day => {
                             const info = getCellSpanInfo(cls, day, t, instSlots);
                             if (info.kind === "covered") return null;
 
                             const isDragTarget = dragOver?.day === day && dragOver?.time === t;
 
                             if (info.kind === "empty") return (
-                              <td
-                                key={day}
-                                style={{
-                                  border: `2px solid ${isDragTarget ? theme.primary : "#ddd"}`,
-                                  height: 44,
-                                  background: isDragTarget ? theme.light2 : "#fff",
-                                  transition: "all 0.12s",
-                                  cursor: dragBlock ? "copy" : "default",
-                                }}
-                                onDragOver={e => handleDragOver(e, day, t)}
-                                onDragLeave={() => setDragOver(null)}
-                                onDrop={e => handleDrop(e, day, t, inst)}
-                              >
-                                {isDragTarget && (
-                                  <div style={{ fontSize: 10, color: theme.primary, fontWeight: 700, textAlign: "center", padding: 4 }}>
-                                    Drop here
-                                  </div>
-                                )}
+                             <td
+  key={day}
+  style={{ ...printCellBox(1), border: `2px solid ${isDragTarget ? theme.primary : "#ddd"}`, padding: "10px 8px", verticalAlign: "middle", background: isDragTarget ? theme.light2 : "#fff", transition: "all 0.12s", cursor: dragBlock ? "copy" : "default" }}
+  onDragOver={e => handleDragOver(e, day, t)}
+  onDragLeave={() => setDragOver(null)}
+  onDrop={e => handleDrop(e, day, t, inst)}
+>
+                                {isDragTarget && (<div style={{ fontSize: 11, color: theme.primary, fontWeight: 700, textAlign: "center", padding: 4 }}>Drop here</div>)}
                               </td>
                             );
 
@@ -2529,31 +2955,34 @@ const handleDrop = async (e, day, time, instructor) => {
                             const rowSpan = info.span;
 
                             if (m.is_break) return (
-                              <td key={day} rowSpan={rowSpan} style={{ border: "1px solid #ddd", textAlign: "center", height: 44 * rowSpan, background: "#fef9c3" }}>
-                                <span style={{ fontSize: 10, color: "#854d0e", fontWeight: 700 }}>☕ Break</span>
-                              </td>
+                             <td key={day} rowSpan={rowSpan} style={{ ...printCellBox(rowSpan), border: "1px solid #ddd", textAlign: "center", verticalAlign: "middle", padding: "8px 8px", background: "#fef9c3" }}>
+  <span style={{ fontSize: 14, color: "#854d0e", fontWeight: 700 }}>☕ Break</span>
+</td>
                             );
 
                             const isDragging = dragBlock && m.id === dragBlock.id;
                             const lb = m.roomType === "Laboratory";
                             const { code, name, type } = resolveSubjectDisplay(m, codeMap);
-                            const badgeBg = getBadgeBg(type, theme);
+                            const sc = getSubjectColor(m.subject, type, m.roomType);
 
                             return (
-                              <td
-                                key={day}
-                                rowSpan={rowSpan}
-                                style={{
-                                  border: `1px solid #ddd`,
-                                  textAlign: "center",
-                                  verticalAlign: "middle",
-                                  height: 44 * rowSpan,
-                                  background: isDragging ? "rgba(0,0,0,0.04)" : (lb ? theme.light2 : theme.light),
-                                  opacity: isDragging ? 0.45 : 1,
-                                  cursor: m.id ? "grab" : "default",
-                                  transition: "all 0.12s",
-                                  outline: isDragging ? `2px dashed ${theme.primary}` : "none",
-                                }}
+                             <td
+  key={day}
+  rowSpan={rowSpan}
+  style={{
+    ...printCellBox(rowSpan),
+    border: `1px solid #ddd`,
+    borderLeft: `5px solid ${sc.cellBorder}`,
+    textAlign: "center",
+    verticalAlign: "middle",
+    padding: "14px 10px",
+    background: isDragging ? "rgba(0,0,0,0.04)" : sc.cellBg,
+    opacity: isDragging ? 0.45 : 1,
+    cursor: m.id ? "grab" : "default",
+    transition: "all 0.12s",
+    outline: isDragging ? `2px dashed ${theme.primary}` : "none",
+  }}
+  
                                 draggable={!!m.id}
                                 onDragStart={e => m.id && handleDragStart(e, m)}
                                 onDragOver={e => handleDragOver(e, day, t)}
@@ -2561,142 +2990,139 @@ const handleDrop = async (e, day, time, instructor) => {
                                 onDrop={e => handleDrop(e, day, t, inst)}
                                 onDoubleClick={() => m.id && setEditingBlock(m)}
                               >
-                                <div style={{ display: "inline-flex", alignItems: "center", background: badgeBg, color: "#fff", borderRadius: 4, padding: "2px 8px", fontSize: 10, fontWeight: 900, letterSpacing: 0.8, textTransform: "uppercase", marginBottom: 2 }}>
-                                  {code || name}
-                                </div>
-                                {m.section && <div style={{ fontSize: 9, color: theme.primary, fontWeight: 700 }}>{m.section}</div>}
-                                <div style={{ fontSize: 9, color: "#475569" }}>{m.room}</div>
-                                <div style={{ fontSize: 9, color: lb ? theme.text : "#166534", fontWeight: 700 }}>{lb ? "🔬 Lab" : "📖 Lec"}</div>
-                                {m.id && (
-                                  <div style={{ fontSize: 8, color: "#94a3b8", marginTop: 2 }}>✥ drag</div>
-                                )}
-                              </td>
-                            );
-                          })}
-            </tr>
-          );
-        })}
-      </tbody>
-    </table>
-  </div>
-</div>
-
-{!collapsed[inst] && (
-              <div style={{ overflowX: "auto" }}>
-
-
-
-
-
-                
-<table style={{ width: "100%", borderCollapse: "collapse", tableLayout: "fixed", fontSize: 12 }}>
-                  <thead>
-                    <tr>
-                      <th style={{ background: theme.primary, color: "#fff", padding: "7px 10px", border: `1px solid ${theme.primary3 || theme.primary}`, minWidth: 90, textAlign: "center", fontSize: 11 }}>Time</th>
-                      {DAYS.map(d => (
-                        <th key={d} style={{ background: theme.primary, color: "#fff", padding: "7px 8px", border: `1px solid ${theme.primary3 || theme.primary}`, textAlign: "center", fontSize: 11, minWidth: 110 }}>{d}</th>
-                      ))}
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {instSlots.map(t => {
-                      if (t === LUNCH_START) return (
-                        <tr key="lunch">
-                          <td style={{ background: "#fef9c3", border: "1px solid #ddd", padding: "4px 8px", fontWeight: 700, fontSize: 10, textAlign: "center", color: "#854d0e", height: 28 }}>{fmtRange(LUNCH_START, LUNCH_END)}</td>
-                          {DAYS.map(day => (
-                            <td key={day} style={{ border: "1px solid #ddd", textAlign: "center", height: 28, background: "#fef9c3" }}>
-                              <span style={{ fontSize: 10, color: "#854d0e", fontWeight: 700 }}>🍽 Lunch</span>
-                            </td>
-                          ))}
-                        </tr>
-                      );
-                      if (t > LUNCH_START && t < LUNCH_END) return null;
-                      const nextT = instSlots[instSlots.indexOf(t) + 1] ?? (t + 1);
-
-                      return (
-                        <tr key={t}>
-                        <td style={{ background: theme.light, border: "1px solid #ddd", padding: "4px 8px", fontWeight: 700, fontSize: 10, textAlign: "center", color: theme.primary, height: 44, whiteSpace: "nowrap", width: 120, minWidth: 120 }}>
-  {fmtRange(t, nextT)}
-</td>
-                          {DAYS.map(day => {
-                            const m   = cls.find(c => c.day === day && Number(c.start) <= t && Number(c.end) > t && !c.is_break);
-                            const brk = cls.find(c => c.day === day && c.is_break && Number(c.start) <= t && Number(c.end) > t);
-                            const isDragTarget = dragOver?.day === day && dragOver?.time === t;
-                            const isDragging   = dragBlock && m && m.id === dragBlock.id;
-                            const lb = m?.roomType === "Laboratory";
-
-                            if (brk) return (
-                              <td key={day} style={{ border: "1px solid #ddd", textAlign: "center", height: 44, background: "#fef9c3" }}>
-                                <span style={{ fontSize: 10, color: "#854d0e", fontWeight: 700 }}>☕ Break</span>
-                              </td>
-                            );
-
-                            if (!m) return (
-                              <td
-                                key={day}
-                                style={{
-                                  border: `2px solid ${isDragTarget ? theme.primary : "#ddd"}`,
-                                  height: 44,
-                                  background: isDragTarget ? theme.light2 : "#fff",
-                                  transition: "all 0.12s",
-                                  cursor: dragBlock ? "copy" : "default",
-                                }}
-                                onDragOver={e => handleDragOver(e, day, t)}
-                                onDragLeave={() => setDragOver(null)}
-                                onDrop={e => handleDrop(e, day, t, inst)}
-                              >
-                                {isDragTarget && (
-                                  <div style={{ fontSize: 10, color: theme.primary, fontWeight: 700, textAlign: "center", padding: 4 }}>
-                                    Drop here
-                                  </div>
-                                )}
-                              </td>
-                            );
-
-                            const { code, name, type } = resolveSubjectDisplay(m, codeMap);
-                            const isGE = type === "GE";
-                            const badgeBg = getBadgeBg(type, theme);
-
-                            return (
-                              <td
-                                key={day}
-                                style={{
-                                  border: `1px solid #ddd`,
-                                  textAlign: "center",
-                                  verticalAlign: "middle",
-                                  height: 44,
-                                  background: isDragging ? "rgba(0,0,0,0.04)" : (lb ? theme.light2 : theme.light),
-                                  opacity: isDragging ? 0.45 : 1,
-                                  cursor: m.id ? "grab" : "default",
-                                  transition: "all 0.12s",
-                                  outline: isDragging ? `2px dashed ${theme.primary}` : "none",
-                                }}
-                                draggable={!!m.id}
-                                onDragStart={e => m.id && handleDragStart(e, m)}
-                                onDragOver={e => handleDragOver(e, day, t)}
-                                onDragLeave={() => setDragOver(null)}
-                                onDrop={e => handleDrop(e, day, t, inst)}
-                                onDoubleClick={() => m.id && setEditingBlock(m)}
-                              >
-                                <div style={{ display: "inline-flex", alignItems: "center", background: badgeBg, color: "#fff", borderRadius: 4, padding: "2px 8px", fontSize: 10, fontWeight: 900, letterSpacing: 0.8, textTransform: "uppercase", marginBottom: 2 }}>
-                                  {code || name}
-                                </div>
-                                {m.section && <div style={{ fontSize: 9, color: theme.primary, fontWeight: 700 }}>{m.section}</div>}
-                                <div style={{ fontSize: 9, color: "#475569" }}>{m.room}</div>
-                                <div style={{ fontSize: 9, color: lb ? theme.text : "#166534", fontWeight: 700 }}>{lb ? "🔬 Lab" : "📖 Lec"}</div>
-                                {m.id && (
-                                  <div style={{ fontSize: 8, color: "#94a3b8", marginTop: 2 }}>✥ drag</div>
-                                )}
+              <div style={{ display: "inline-flex", alignItems: "center", background: sc.badgeBg, color: "#fff", borderRadius: 5, padding: "9px 18px", fontSize: 19, fontWeight: 900, letterSpacing: 0.8, textTransform: "uppercase", marginBottom: 6 }}>
+  {code || name}
+</div>{m.section && <div style={{ fontSize: 18, lineHeight: 1.3, color: sc.accentColor, fontWeight: 700 }}>{m.section}</div>}
+<div style={{ fontSize: 18, lineHeight: 1.3, color: "#475569" }}>{m.room}</div>
+<div style={{ fontSize: 18, lineHeight: 1.3, color: sc.accentColor, fontWeight: 700 }}>{lb ? "🔬 Lab" : "📖 Lec"}</div>
+              {m.id && (<div style={{ fontSize: 11, color: "#94a3b8", marginTop: 5 }}>✥ drag</div>)}
                               </td>
                             );
                           })}
                         </tr>
                       );
                     })}
-              </tbody>
+                  </tbody>
                 </table>
+                <SignatureBlock/>
               </div>
-)}
+              </div>
+
+              {!collapsed[inst] && (
+                <div style={{ overflowX: "auto" }}>
+                  <table style={{ width: "100%", borderCollapse: "collapse", tableLayout: "fixed", fontSize: 15 }}>
+                    <colgroup>
+                      <col style={{ width: "160px" }} />
+                      {DAYS.map(d => <col key={d} style={{ width: "calc((100% - 160px) / 7)" }} />)}
+                    </colgroup>
+                    <thead>
+                      <tr>
+                        <th style={{ background: theme.primary, color: "#fff", padding: "14px 16px", border: `1px solid ${theme.primary3 || theme.primary}`, textAlign: "center", fontSize: 14 }}>Time</th>
+                        {DAYS.map(d => (
+                          <th key={d} style={{ background: theme.primary, color: "#fff", padding: "14px 12px", border: `1px solid ${theme.primary3 || theme.primary}`, textAlign: "center", fontSize: 14 }}>{d}</th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {instSlots.map(t => {
+                        const nextT = instSlots[instSlots.indexOf(t) + 1] ?? (t + 1);
+                        if (t === LUNCH_START) return (
+                          <tr key="lunch">
+                            <td style={{ ...printCellBox(1), background: theme.light, border: "1px solid #ddd", padding: "4px 8px", fontWeight: 700, fontSize: 13, textAlign: "center", verticalAlign: "middle", color: theme.primary, whiteSpace: "nowrap" }}>
+  {fmtRange(t, nextT)}
+</td>
+                            {DAYS.map(day => <td key={day} style={{ border: "1px solid #ddd", textAlign: "center", verticalAlign: "middle", padding: "10px 12px", background: "#fef9c3" }}><span style={{ fontSize: 12, color: "#854d0e", fontWeight: 700 }}>🍽 Lunch</span></td>)}
+                          </tr>
+                        );
+                        if (t > LUNCH_START && t < LUNCH_END) return null;
+                        return (
+                          <tr key={t}>
+                            <td style={{ background: theme.light, border: "1px solid #ddd", padding: "10px 12px", fontWeight: 700, fontSize: 13, textAlign: "center", verticalAlign: "middle", color: theme.primary, whiteSpace: "nowrap" }}>{fmtRange(t, nextT)}</td>
+                            {DAYS.map(day => {
+                              const info = getCellSpanInfo(cls, day, t, instSlots);
+                              if (info.kind === "covered") return null;
+
+                              const isDragTarget = dragOver?.day === day && dragOver?.time === t;
+
+                              if (info.kind === "empty") return (
+                                <td
+                                  key={day}
+                                  style={{
+                                    border: `2px solid ${isDragTarget ? theme.primary : "#ddd"}`,
+                                    padding: "10px 12px",
+                                    verticalAlign: "middle",
+                                    background: isDragTarget ? theme.light2 : "#fff",
+                                    transition: "all 0.12s",
+                                    cursor: dragBlock ? "copy" : "default",
+                                  }}
+                                  onDragOver={e => handleDragOver(e, day, t)}
+                                  onDragLeave={() => setDragOver(null)}
+                                  onDrop={e => handleDrop(e, day, t, inst)}
+                                >
+                                  {isDragTarget && (
+                                    <div style={{ fontSize: 11, color: theme.primary, fontWeight: 700, textAlign: "center", padding: 4 }}>
+                                      Drop here
+                                    </div>
+                                  )}
+                                </td>
+                              );
+
+                              const m = info.block;
+                              const rowSpan = info.span;
+
+                              if (m.is_break) return (
+                                <td key={day} rowSpan={rowSpan} style={{ border: "1px solid #ddd", textAlign: "center", verticalAlign: "middle", padding: "10px 12px", background: "#fef9c3" }}>
+                                  <span style={{ fontSize: 14, color: "#854d0e", fontWeight: 700 }}>☕ Break</span>
+                                </td>
+                              );
+
+                              const isDragging = dragBlock && m.id === dragBlock.id;
+                              const lb = m.roomType === "Laboratory";
+                              const { code, name, type } = resolveSubjectDisplay(m, codeMap);
+                              const sc = getSubjectColor(m.subject, type, m.roomType);
+
+                              return (
+                                <td
+                                  key={day}
+                                  rowSpan={rowSpan}
+                                  style={{
+                                    border: `1px solid #ddd`,
+                                    borderLeft: `4px solid ${sc.cellBorder}`,
+                                    textAlign: "center",
+                                    verticalAlign: "middle",
+                                    padding: "10px 12px",
+                                    background: isDragging ? "rgba(0,0,0,0.04)" : sc.cellBg,
+                                    opacity: isDragging ? 0.45 : 1,
+                                    cursor: m.id ? "grab" : "default",
+                                    transition: "all 0.12s",
+                                    outline: isDragging ? `2px dashed ${theme.primary}` : "none",
+                                  }}
+                                  draggable={!!m.id}
+                                  onDragStart={e => m.id && handleDragStart(e, m)}
+                                  onDragOver={e => handleDragOver(e, day, t)}
+                                  onDragLeave={() => setDragOver(null)}
+                                  onDrop={e => handleDrop(e, day, t, inst)}
+                                  onDoubleClick={() => m.id && setEditingBlock(m)}
+                                >
+                                  <div style={{ display: "inline-flex", alignItems: "center", background: sc.badgeBg, color: "#fff", borderRadius: 4, padding: "4px 12px", fontSize: 13, fontWeight: 900, letterSpacing: 0.8, textTransform: "uppercase", marginBottom: 3 }}>
+                                    {code || name}
+                                  </div>
+                                  {m.section && <div style={{ fontSize: 11.5, color: sc.accentColor, fontWeight: 700 }}>{m.section}</div>}
+                                  <div style={{ fontSize: 11.5, color: "#475569" }}>{m.room}</div>
+                                  <div style={{ fontSize: 11.5, color: sc.accentColor, fontWeight: 700 }}>{lb ? "🔬 Lab" : "📖 Lec"}</div>
+                                  {m.id && (
+                                    <div style={{ fontSize: 10, color: "#94a3b8", marginTop: 3 }}>✥ drag</div>
+                                  )}
+                                </td>
+                              );
+                            })}
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              )}
             </div>
           );
         })}
@@ -2707,15 +3133,36 @@ const handleDrop = async (e, day, time, instructor) => {
 
 /* ════════ DRAG-DROP INLINE SCHEDULE GRID — STUDENT ════════ */
 /* ════════ DRAG-DROP INLINE SCHEDULE GRID — STUDENT ════════ */
+/* ════════ DRAG-DROP INLINE SCHEDULE GRID — STUDENT ════════
+   Rebuilt to match the faculty (InlineScheduleGrid) print layout 1:1:
+   - Same print page size (12.5in x 8in on 13in x 8.5in paper)
+   - Same header dimensions, stats bar, TIME:AM / TIME:PM split rows
+   - Same fixed-row-height cell system (printCellBox / PRINT_ROW_H)
+   - Same muted subject-color system (getSubjectColor) instead of the
+     old GE/theme gradient badges
+   - Same on-screen (non-printed) table font sizes / colgroup widths
+   - Adds the SubjectColorLegend strip, same as the faculty view
+   ════════════════════════════════════════════════════════════ */
+/* ════════ DRAG-DROP INLINE SCHEDULE GRID — STUDENT ════════
+   Rebuilt to match the faculty (InlineScheduleGrid) print layout 1:1:
+   - Same print page size (12.5in x 8in on 13in x 8.5in paper)
+   - Same header dimensions, stats bar, TIME:AM / TIME:PM split rows
+   - Same fixed-row-height cell system (printCellBox / PRINT_ROW_H)
+   - Same muted subject-color system (getSubjectColor) instead of the
+     old GE/theme gradient badges
+   - Same on-screen (non-printed) table font sizes / colgroup widths
+   - Adds the SubjectColorLegend strip, same as the faculty view
+   ════════════════════════════════════════════════════════════ */
 function InlineStudentGrid({ schedules, allSchedules, academicYear, semester, onMoveBlock, onCheckMove, theme, codeMap, instructorPool = [] }) {
   const [dragBlock, setDragBlock] = useState(null);
   const [dragOver, setDragOver]   = useState(null);
   const [toast, setToast]         = useState(null);
   const [collapsed, setCollapsed] = useState({});
+  const [editingBlock, setEditingBlock] = useState(null);
   const real     = schedules.filter(s => !s.is_break);
   const sections = [...new Set(real.filter(s => s.section?.trim()).map(s => s.section))].sort();
 
-useEffect(() => {
+  useEffect(() => {
     setCollapsed(prev => {
       const next = { ...prev };
       let changed = false;
@@ -2724,66 +3171,149 @@ useEffect(() => {
     });
   }, [sections.join("|")]);
 
+  // Printable rows use the AM/PM section headings, same as faculty — keeps
+  // each time range compact next to the fixed-height cells.
+  const formatPrintTime = (start, end) =>
+    fmtRange(start, end).replace(/\s(?:AM|PM)\b/gi, "");
 
-
-const handlePrint = (section) => {
+  const handlePrint = (section) => {
     const win = window.open("", "_blank");
     const content = document.getElementById(`inline-student-print-${section}`)?.innerHTML || "";
-    win.document.write(`<!DOCTYPE html><html><head><title>Schedule - ${section}</title><style>
-*{box-sizing:border-box;margin:0;padding:0;}
-body{font-family:Arial,sans-serif;font-size:10pt;color:#000;}
-.print-page{
-  width:281mm;
-  height:194mm;      /* A4 landscape (297x210mm) minus 8mm margin on each side */
-  overflow:hidden;
-  position:relative;
-}
-.print-inner{ transform-origin: top left; }
-table{width:100%;border-collapse:collapse;table-layout:fixed;}
-th:first-child,td:first-child{width:80px;}
-th{background:${theme.primary};color:#fff;font-weight:bold;padding:5px 4px;text-align:center;border:1px solid ${theme.primary3||theme.primary};font-size:8pt;}
-td{border:1px solid #ddd;padding:3px;text-align:center;vertical-align:middle;height:34px;font-size:8pt;}
-thead{display:table-header-group;}
-@media print{@page{margin:8mm;size:A4 landscape;}body{-webkit-print-color-adjust:exact;print-color-adjust:exact;}}
-</style></head><body>
-<div class="print-page" id="printPage"><div class="print-inner" id="printInner">${content}</div></div>
-<script>
-  function fitAndPrint() {
-    var outer = document.getElementById('printPage');
-    var inner = document.getElementById('printInner');
-    var availH = outer.clientHeight;   // fixed page height in px
-    var naturalH = inner.scrollHeight; // actual content height, unscaled
-    if (naturalH > availH) {
-      var scale = (availH / naturalH) * 0.98; // small safety margin
-      inner.style.transform = 'scale(' + scale + ')';
-      inner.style.width = (100 / scale) + '%';
-    }
-    setTimeout(function () { window.print(); window.close(); }, 150);
-  }
-  var imgs = Array.prototype.slice.call(document.images);
-  var pending = imgs.filter(function (img) { return !img.complete; }).length;
-  if (pending === 0) {
-    fitAndPrint();
-  } else {
-    var done = 0;
-    imgs.forEach(function (img) {
-      img.addEventListener('load', check);
-      img.addEventListener('error', check);
-    });
-    function check() { done++; if (done >= pending) fitAndPrint(); }
-    setTimeout(fitAndPrint, 2000); // fallback
-  }
-</script>
-</body></html>`);
-    win.document.close(); win.focus();
+    if (!win) return;
+    if (!content) { win.close(); return; }
+
+    win.document.write(`<!DOCTYPE html>
+<html>
+  <head>
+    <title>Class Schedule - ${section}</title>
+    <style>
+      :root {
+        --page-width: 12.5in;
+        --page-height: 8in;
+        --time-column: 2in;
+      }
+
+      * { box-sizing: border-box; margin: 0; padding: 0; }
+      html, body { width: var(--page-width); min-height: var(--page-height); }
+      body { font-family: Arial, sans-serif; font-size: 10pt; color: #000; background: #fff; }
+
+      .print-page {
+        width: var(--page-width);
+        height: var(--page-height);
+        overflow: hidden;
+        position: relative;
+      }
+
+      .print-inner { width: 100%; transform-origin: top left; }
+
+      /* Keep the time column and seven weekday columns at fixed, stable widths. */
+      .print-table > table {
+        width: 100% !important;
+        border-collapse: collapse;
+        table-layout: fixed !important;
+      }
+      .print-table > table col:first-child { width: var(--time-column) !important; }
+      .print-table > table col:not(:first-child) { width: calc((100% - var(--time-column)) / 7) !important; }
+      .print-table > table th:first-child,
+      .print-table > table td:first-child {
+        width: var(--time-column) !important;
+        min-width: var(--time-column) !important;
+        max-width: var(--time-column) !important;
+        white-space: nowrap !important;
+      }
+      .print-table > table tr,
+      .print-table > table td,
+      .print-table > table th {
+        break-inside: avoid;
+        page-break-inside: avoid;
+      }
+      .print-table > table thead { display: table-header-group; }
+
+      /* Shrink the logo row so the header never starves the table below it. */
+      .print-header > div:first-child { padding-bottom: 6px !important; margin-bottom: 6px !important; }
+      .print-header > div:first-child > div { gap: 10px !important; }
+      .print-header > div:first-child img { width: 50px !important; height: 50px !important; }
+      .print-header > div:first-child > div > div:nth-child(2) > div:nth-child(1) { font-size: 16px !important; }
+      .print-header > div:first-child > div > div:nth-child(2) > div:nth-child(2) { font-size: 13px !important; margin-top: 1px !important; }
+      .print-header > div:first-child > div > div:nth-child(2) > div:nth-child(3) { font-size: 12px !important; margin-top: 1px !important; }
+      .print-header > div:nth-child(2) { font-size: 16px !important; margin: 10px 0 7px !important; }
+      .print-header > div:nth-child(3) { font-size: 12px !important; margin-bottom: 10px !important; }
+      .print-header > div:last-child { font-size: 12px !important; padding: 12px 20px !important; margin-bottom: 12px !important; gap: 28px !important; }
+
+      @page { size: 13in 8.5in; margin: 0.25in; }
+
+      @media print {
+        html, body { width: var(--page-width); min-height: var(--page-height); }
+        body { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+        .print-page { width: var(--page-width); height: var(--page-height); overflow: hidden; }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="print-page"><div class="print-inner" id="printInner">${content}</div></div>
+    <script>
+      (function () {
+        var printed = false;
+
+        function fitWholePage() {
+          var outer = document.querySelector(".print-page");
+          var inner = document.getElementById("printInner");
+          if (!outer || !inner) return;
+
+          var header = inner.querySelector(".print-header");
+          var tableWrap = inner.querySelector(".print-table");
+          if (!header || !tableWrap) return;
+
+          tableWrap.style.width = "100%";
+          tableWrap.style.transform = "none";
+
+          var availableHeight = outer.clientHeight - header.offsetHeight;
+          var widthScale  = outer.clientWidth / tableWrap.scrollWidth;
+          var heightScale = availableHeight / tableWrap.scrollHeight;
+          var scale = Math.min(1, widthScale, heightScale);
+
+          if (scale > 0 && isFinite(scale) && scale < 1) {
+            tableWrap.style.width = (100 / scale) + "%";
+            tableWrap.style.transform = "scale(" + scale + ")";
+            tableWrap.style.transformOrigin = "top left";
+          }
+        }
+
+        function printOnce() {
+          if (printed) return;
+          printed = true;
+          fitWholePage();
+          setTimeout(function () { window.print(); window.close(); }, 150);
+        }
+
+        var images = Array.prototype.slice.call(document.images);
+        var pending = images.filter(function (image) { return !image.complete; }).length;
+
+        if (!pending) {
+          requestAnimationFrame(printOnce);
+        } else {
+          var finished = 0;
+          function imageDone() { finished += 1; if (finished >= pending) printOnce(); }
+          images.forEach(function (image) {
+            image.addEventListener("load", imageDone, { once: true });
+            image.addEventListener("error", imageDone, { once: true });
+          });
+          setTimeout(printOnce, 2000);
+        }
+      }());
+    </script>
+  </body>
+</html>`);
+    win.document.close();
+    win.focus();
   };
-  
+
   const handleDragStart = (e, block) => {
     setDragBlock(block);
     e.dataTransfer.effectAllowed = "move";
   };
 
-const handleDrop = async (e, day, time, section) => {
+  const handleDrop = async (e, day, time, section) => {
     e.preventDefault();
     if (!dragBlock || dragBlock.section !== section) return;
     setDragOver(null);
@@ -2793,7 +3323,7 @@ const handleDrop = async (e, day, time, section) => {
     if (!(newStart < newEnd)) { setDragBlock(null); return; }
     if (newStart === dragBlock.start && day === dragBlock.day) { setDragBlock(null); return; }
 
-   const target = { day, start: newStart, end: newEnd, room: dragBlock.room };
+    const target = { day, start: newStart, end: newEnd, room: dragBlock.room };
     const { conflicts, moved, others } = onCheckMove(dragBlock, target);
 
     if (conflicts.length > 0) {
@@ -2823,19 +3353,36 @@ const handleDrop = async (e, day, time, section) => {
           allSchedules={allSchedules}
           onClose={() => setToast(null)}
           onMoveSchedule={async (block, sg) => {
-  const target = toast?.movedBlock || block;
-  const targetRoom  = sg.room || target.room;
-  const targetStart = Number(sg.start);
-  const targetEnd   = Number(sg.end);
-  if (!targetRoom || targetStart === undefined || targetEnd === undefined || targetStart >= targetEnd) return;
-  const payload = { day: sg.day, start: targetStart, end: targetEnd, room: targetRoom };
-  if (sg.instructor) payload.instructor = sg.instructor;
-  await onMoveBlock(target, payload);
-  setToast(null);
-}}
+            const target = toast?.movedBlock || block;
+            const targetRoom  = sg.room || target.room;
+            const targetStart = Number(sg.start);
+            const targetEnd   = Number(sg.end);
+            if (!targetRoom || targetStart === undefined || targetEnd === undefined || targetStart >= targetEnd) return;
+            const payload = { day: sg.day, start: targetStart, end: targetEnd, room: targetRoom };
+            if (sg.instructor) payload.instructor = sg.instructor;
+            await onMoveBlock(target, payload);
+            setToast(null);
+          }}
           instructorPool={instructorPool}
         />
       )}
+
+      {editingBlock && (
+        <EditModal
+          block={editingBlock}
+          theme={theme}
+          onClose={() => setEditingBlock(null)}
+          onSave={async (updated) => {
+            await onMoveBlock(editingBlock, { day: updated.day, start: updated.start, end: updated.end, room: updated.room });
+            setEditingBlock(null);
+          }}
+        />
+      )}
+
+      {/* Legend row — same subject-color key strip used on the faculty view */}
+      <div style={{ marginBottom: 12 }}>
+        <SubjectColorLegend blocks={schedules} codeMap={codeMap} />
+      </div>
 
       {sections.length === 0 && (
         <div style={{ textAlign: "center", padding: "48px 0", color: "#94a3b8", fontSize: 14 }}>
@@ -2856,209 +3403,251 @@ const handleDrop = async (e, day, time, section) => {
         const labH    = realCls.filter(c => c.roomType === "Laboratory").reduce((s, c) => s + (c.end - c.start), 0);
         const lecH    = realCls.filter(c => c.roomType === "Lecture").reduce((s, c) => s + (c.end - c.start), 0);
         const timeSlots = buildPrintTimeSlots(cls);
-return (
+
+        return (
           <div key={sec} style={{ marginBottom: 28, border: `1px solid ${theme.border}`, borderRadius: 10, overflow: "hidden" }}>
+            {/* Section header */}
             <div
               style={{ background: theme.primary, color: "#fff", padding: "9px 16px", display: "flex", alignItems: "center", gap: 14, flexWrap: "wrap", cursor: "pointer", userSelect: "none" }}
               onClick={() => setCollapsed(prev => ({ ...prev, [sec]: !prev[sec] }))}
             >
               <span style={{ fontWeight: 700, fontSize: 14 }}>🎓 {sec}</span>
               <span style={{ fontSize: 11, opacity: 0.8 }}>⏱ {total} hrs total</span>
-              <span style={{ fontSize: 11, opacity: 0.8 }}>📖 {lecH}h Lec</span>
-              <span style={{ fontSize: 11, opacity: 0.8 }}>🔬 {labH}h Lab</span>
+              <span style={{ fontSize: 11, opacity: 0.8 }}>📖 Lecture: {lecH}h</span>
+              <span style={{ fontSize: 11, opacity: 0.8 }}>🔬 Lab: {labH}h</span>
               <button
                 onClick={e => { e.stopPropagation(); handlePrint(sec); }}
-                style={{ padding: "5px 14px", background: "rgba(255,255,255,0.15)", color: "#fff", border: "1px solid rgba(255,255,255,0.3)", borderRadius: 7, cursor: "pointer", fontSize: 11, fontWeight: 600 }}
+                style={{ padding: "6px 16px", background: "rgba(255,255,255,0.15)", color: "#fff", border: "1px solid rgba(255,255,255,0.3)", borderRadius: 7, cursor: "pointer", fontSize: 12, fontWeight: 600 }}
               >
                 🖨 Print
               </button>
               <span style={{ marginLeft: "auto", fontSize: 12, opacity: 0.85 }}>{collapsed[sec] ? "▶ Show" : "▼ Hide"}</span>
             </div>
 
-  {/* Hidden printable version */}
-<div id={`inline-student-print-${sec}`} style={{ display: "none" }}>
-  <div style={{ display: "flex", justifyContent: "center", paddingBottom: 8, marginBottom: 8, borderBottom: "3px double #000" }}>
-    <div style={{ display: "flex", alignItems: "center", gap: 12, maxWidth: 460 }}>
-      <DeptLogo code={theme.code} style={{ width: 48, height: 48, objectFit: "contain", flexShrink: 0 }} alt={theme.code}/>
-      <div style={{ textAlign: "center" }}>
-        <div style={{ fontSize: 14, fontWeight: 900, textTransform: "uppercase" }}>Passi City College</div>
-        <div style={{ fontSize: 10, fontWeight: 700, color: theme.primary, marginTop: 2 }}>{theme.shortName}</div>
-        <div style={{ fontSize: 8, color: "#555", marginTop: 1 }}>Barangay Bacuranan, Passi City, Iloilo</div>
-      </div>
-      <img src={PCCLogo} style={{ width: 48, height: 48, objectFit: "contain", flexShrink: 0 }} alt="PCC"/>
-    </div>
-  </div>
-  <div style={{ textAlign: "center", fontWeight: "bold", fontSize: 13, textTransform: "uppercase", margin: "8px 0 4px" }}>Class Schedule — {sec}</div>
-  {academicYear && semester && <div style={{ textAlign: "center", fontSize: 10, color: theme.primary, marginBottom: 6 }}>A.Y. {academicYear} · {semester}</div>}
-  <table style={{ width: "100%", borderCollapse: "collapse", tableLayout: "fixed", fontSize: 8 }}>
-    <thead><tr>
-      <th style={{ background: theme.primary, color: "#fff", border: `1px solid ${theme.primary}`, padding: "6px 4px", width: 80 }}>Time</th>
-      {DAYS.map(d => <th key={d} style={{ background: theme.primary, color: "#fff", border: `1px solid ${theme.primary}`, padding: "6px 4px" }}>{d}</th>)}
-    </tr></thead>
-    <tbody>
-      {timeSlots.map(t => {
-        if (t === LUNCH_START) return (
-          <tr key="lunch">
-            <td style={{ background: "#fef9c3", border: "1px solid #ddd", padding: "3px 4px", fontWeight: 700, fontSize: 7.5, textAlign: "center", color: "#854d0e", height: 28, whiteSpace: "nowrap" }}>{fmtRange(LUNCH_START, LUNCH_END)}</td>
-            {DAYS.map(day => <td key={day} style={{ border: "1px solid #ddd", textAlign: "center", height: 28, background: "#fef9c3" }}><span style={{ fontSize: 8, color: "#854d0e", fontWeight: 700 }}>🍽 Lunch</span></td>)}
-          </tr>
-        );
-        if (t > LUNCH_START && t < LUNCH_END) return null;
-        const nextT = timeSlots[timeSlots.indexOf(t) + 1] ?? (t + 1);
-        return (
-          <tr key={t}>
-            <td style={{ background: theme.light, border: "1px solid #ddd", padding: "3px 4px", fontWeight: 700, fontSize: 7.5, textAlign: "center", color: theme.primary, height: 40, whiteSpace: "nowrap" }}>{fmtRange(t, nextT)}</td>
-          {DAYS.map(day => {
-                          const info = getCellSpanInfo(cls, day, t, timeSlots);
-                          if (info.kind === "covered") return null;
+            {/* Hidden printable schedule — mirrors the faculty print structure exactly */}
+            <div id={`inline-student-print-${sec}`} style={{ display: "none" }}>
+              <div className="print-header">
+                <div style={{ display: "flex", justifyContent: "center", paddingBottom: 14, marginBottom: 14, borderBottom: "3px double #000" }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 24, maxWidth: 900 }}>
+                    <DeptLogo code={theme.code} style={{ width: 72, height: 72, objectFit: "contain", flexShrink: 0 }} alt={theme.code}/>
+                    <div style={{ textAlign: "center" }}>
+                      <div style={{ fontSize: 21, fontWeight: 900, textTransform: "uppercase" }}>Passi City College</div>
+                      <div style={{ fontSize: 18, fontWeight: 700, color: theme.primary, marginTop: 4 }}>{theme.shortName}</div>
+                      <div style={{ fontSize: 17, color: "#555", marginTop: 3 }}>Barangay Bacuranan, Passi City, Iloilo</div>
+                    </div>
+                    <img src={PCCLogo} style={{ width: 72, height: 72, objectFit: "contain", flexShrink: 0 }} alt="PCC"/>
+                  </div>
+                </div>
+                <div style={{ textAlign: "center", fontWeight: "bold", fontSize: 35, textTransform: "uppercase", margin: "8px 0 6px" }}>Class Schedule — {sec}</div>
+                {academicYear && semester && <div style={{ textAlign: "center", fontSize: 15, color: theme.primary, marginBottom: 8 }}>A.Y. {academicYear} · {semester}</div>}
+                <div style={{ background: theme.primary, color: theme.light, fontSize: 18, padding: "12px 20px", marginBottom: 12, display: "flex", gap: 28, flexWrap: "wrap", borderRadius: 4 }}>
+                  <span>⏱ Total: <strong style={{ color: "#fff" }}>{total} hrs</strong></span>
+                  <span>📖 Lecture: <strong style={{ color: "#fff" }}>{lecH} hrs</strong></span>
+                  <span>🔬 Lab: <strong style={{ color: "#fff" }}>{labH} hrs</strong></span>
+                </div>
+              </div>
 
-                          const isDragTarget = dragOver?.day === day && dragOver?.time === t;
+              <div className="print-table">
+                <table style={{ width: "100%", borderCollapse: "collapse", tableLayout: "fixed", fontSize: 22 }}>
+                  <colgroup>
+                    <col style={{ width: "250px" }} />
+                    {DAYS.map(d => <col key={d} style={{ width: "calc((100% - 250px) / 7)" }} />)}
+                  </colgroup>
+                  <thead><tr>
+                    <th style={{ background: theme.primary3 || theme.primary, color: "#fff", border: `1px solid ${theme.primary}`, padding: "10px 8px", fontSize: 20, whiteSpace: "nowrap" }}>TIME : AM</th>
+                    {DAYS.map(d => <th key={d} style={{ background: theme.primary, color: "#fff", border: `1px solid ${theme.primary3 || theme.primary}`, padding: "10px 8px", fontSize: 20 }}>{d}</th>)}
+                  </tr></thead>
+                  <tbody>
+                    {timeSlots.map(t => {
+                      if (t === LUNCH_START) return [
+                        <tr key="lunch">
+                          <td style={{ ...printCellBox(1), background: "#fef9c3", border: "1px solid #ddd", padding: "8px 8px", fontWeight: 700, fontSize: 20, textAlign: "center", verticalAlign: "middle", color: "#854d0e", whiteSpace: "nowrap" }}>{formatPrintTime(LUNCH_START, LUNCH_END)}</td>
+                          {DAYS.map(day => <td key={day} style={{ ...printCellBox(1), border: "1px solid #ddd", textAlign: "center", verticalAlign: "middle", padding: "8px 8px", background: "#fef9c3" }}><span style={{ fontSize: 20, color: "#854d0e", fontWeight: 700 }}>🍽 Lunch</span></td>)}
+                        </tr>,
+                        <tr key="pm-time-heading">
+                          <th scope="row" style={{ ...printCellBox(1), background: theme.primary3 || theme.primary, color: "#fff", border: `1px solid ${theme.primary}`, padding: "4px 8px", fontWeight: 700, fontSize: 20, textAlign: "center", verticalAlign: "middle", whiteSpace: "nowrap" }}>TIME : PM</th>
+                          {DAYS.map(day => <td key={day} style={{ ...printCellBox(1), background: "#fff", border: "1px solid #ddd", padding: "4px 8px" }} />)}
+                        </tr>,
+                      ];
+                      if (t > LUNCH_START && t < LUNCH_END) return null;
+                      const nextT = timeSlots[timeSlots.indexOf(t) + 1] ?? (t + 1);
+                      return (
+                        <tr key={t}>
+                          <td style={{ ...printCellBox(1), background: theme.light, border: "1px solid #ddd", padding: "10px 8px", fontWeight: 700, fontSize: 18, textAlign: "center", verticalAlign: "middle", color: theme.primary, whiteSpace: "nowrap" }}>{formatPrintTime(t, nextT)}</td>
+                          {DAYS.map(day => {
+                            const info = getCellSpanInfo(cls, day, t, timeSlots);
+                            if (info.kind === "covered") return null;
 
-                          if (info.kind === "empty") return (
-                            <td
-                              key={day}
-                              style={{ border: `2px solid ${isDragTarget ? theme.primary : "#ddd"}`, height: 44, background: isDragTarget ? theme.light2 : "#fff", transition: "all 0.12s", cursor: dragBlock ? "copy" : "default" }}
-                              onDragOver={e => handleDragOver(e, day, t)}
-                              onDragLeave={() => setDragOver(null)}
-                              onDrop={e => handleDrop(e, day, t, sec)}
-                            >
-                              {isDragTarget && <div style={{ fontSize: 10, color: theme.primary, fontWeight: 700, textAlign: "center", padding: 4 }}>Drop here</div>}
-                            </td>
-                          );
+                            if (info.kind === "empty") return (
+                              <td key={day} style={{ ...printCellBox(1), border: "2px solid #ddd", padding: "10px 8px", verticalAlign: "middle", background: "#fff" }} />
+                            );
 
-                          const m = info.block;
-                          const rowSpan = info.span;
+                            const m = info.block;
+                            const rowSpan = info.span;
 
-                          if (m.is_break) return (
-                            <td key={day} rowSpan={rowSpan} style={{ border: "1px solid #ddd", textAlign: "center", height: 44 * rowSpan, background: "#fef9c3" }}>
-                              <span style={{ fontSize: 10, color: "#854d0e", fontWeight: 700 }}>☕ Break</span>
-                            </td>
-                          );
+                            if (m.is_break) return (
+                              <td key={day} rowSpan={rowSpan} style={{ ...printCellBox(rowSpan), border: "1px solid #ddd", textAlign: "center", verticalAlign: "middle", padding: "8px 8px", background: "#fef9c3" }}>
+                                <span style={{ fontSize: 14, color: "#854d0e", fontWeight: 700 }}>☕ Break</span>
+                              </td>
+                            );
 
-                          const isDragging = dragBlock && m.id === dragBlock.id;
-                          const lb = m.roomType === "Laboratory";
-                          const { code, name, type } = resolveSubjectDisplay(m, codeMap);
-                          const badgeBg = getBadgeBg(type, theme);
+                            const lb = m.roomType === "Laboratory";
+                            const { code, name, type } = resolveSubjectDisplay(m, codeMap);
+                            const sc = getSubjectColor(m.subject, type, m.roomType);
 
-                          return (
-                            <td
-                              key={day}
-                              rowSpan={rowSpan}
-                              style={{ border: "1px solid #ddd", textAlign: "center", verticalAlign: "middle", height: 44 * rowSpan, background: isDragging ? "rgba(0,0,0,0.04)" : (lb ? theme.light2 : theme.light), opacity: isDragging ? 0.45 : 1, cursor: m.id ? "grab" : "default", transition: "all 0.12s", outline: isDragging ? `2px dashed ${theme.primary}` : "none" }}
-                              draggable={!!m.id}
-                              onDragStart={e => m.id && handleDragStart(e, m)}
-                              onDragOver={e => handleDragOver(e, day, t)}
-                              onDragLeave={() => setDragOver(null)}
-                              onDrop={e => handleDrop(e, day, t, sec)}
-                            >
-                              <div style={{ display: "inline-flex", alignItems: "center", background: badgeBg, color: "#fff", borderRadius: 4, padding: "2px 8px", fontSize: 10, fontWeight: 900, letterSpacing: 0.8, textTransform: "uppercase", marginBottom: 2 }}>
-                                {code || name}
-                              </div>
-                              {m.instructor && <div style={{ fontSize: 9, color: theme.primary, fontWeight: 700 }}>{m.instructor}</div>}
-                              <div style={{ fontSize: 9, color: "#475569" }}>{m.room}</div>
-                              <div style={{ fontSize: 9, color: lb ? theme.text : "#166534", fontWeight: 700 }}>{lb ? "🔬 Lab" : "📖 Lec"}</div>
-                              {m.id && <div style={{ fontSize: 8, color: "#94a3b8", marginTop: 2 }}>✥ drag</div>}
-                            </td>
-                          );
-                        })}
-          </tr>
-        );
-      })}
-    </tbody>
-  </table>
-</div>
-
-{!collapsed[sec] && (
-            <div style={{ overflowX: "auto" }}>
-              <table style={{ width: "100%", borderCollapse: "collapse", tableLayout: "fixed", fontSize: 12 }}>
-                <thead>
-                  <tr>
-                    <th style={{ background: theme.primary, color: "#fff", padding: "7px 10px", border: `1px solid ${theme.primary3 || theme.primary}`, width: 120, minWidth: 120, textAlign: "center", fontSize: 11 }}>Time</th>
-                    {DAYS.map(d => (
-                      <th key={d} style={{ background: theme.primary, color: "#fff", padding: "7px 8px", border: `1px solid ${theme.primary3 || theme.primary}`, textAlign: "center", fontSize: 11, minWidth: 115 }}>{d}</th>
-                    ))}
-                  </tr>
-                </thead>
-                <tbody>
-                  {timeSlots.map(t => {
-                    if (t === LUNCH_START) return (
-                      <tr key="lunch">
-                        <td style={{ background: "#fef9c3", border: "1px solid #ddd", fontWeight: 700, fontSize: 10, textAlign: "center", color: "#854d0e", height: 28 }}>{fmtRange(LUNCH_START, LUNCH_END)}</td>
-                        {DAYS.map(day => <td key={day} style={{ border: "1px solid #ddd", textAlign: "center", height: 28, background: "#fef9c3" }}><span style={{ fontSize: 10, color: "#854d0e", fontWeight: 700 }}>🍽 Lunch</span></td>)}
-                      </tr>
-                    );
-                    if (t > LUNCH_START && t < LUNCH_END) return null;
-                    const nextT = timeSlots[timeSlots.indexOf(t) + 1] ?? (t + 1);
-
-                    return (
-                      <tr key={t}>
-                     <td style={{ background: theme.light, border: "1px solid #ddd", fontWeight: 700, fontSize: 10, textAlign: "center", color: theme.primary, height: 44, whiteSpace: "nowrap", padding: "4px 8px", width: 120, minWidth: 120 }}>
-                          {fmtRange(t, nextT)}
-                        </td>
-                        {DAYS.map(day => {
-                          const m   = cls.find(c => c.day === day && Number(c.start) <= t && Number(c.end) > t && !c.is_break);
-                          const brk = cls.find(c => c.day === day && c.is_break && Number(c.start) <= t && Number(c.end) > t);
-                          const isDragTarget = dragOver?.day === day && dragOver?.time === t;
-                          const isDragging   = dragBlock && m && m.id === dragBlock.id;
-                          const lb = m?.roomType === "Laboratory";
-
-                          if (brk) return (
-                            <td key={day} style={{ border: "1px solid #ddd", textAlign: "center", height: 44, background: "#fef9c3" }}>
-                              <span style={{ fontSize: 10, color: "#854d0e", fontWeight: 700 }}>☕ Break</span>
-                            </td>
-                          );
-
-                          if (!m) return (
-                            <td
-                              key={day}
-                              style={{ border: `2px solid ${isDragTarget ? theme.primary : "#ddd"}`, height: 44, background: isDragTarget ? theme.light2 : "#fff", transition: "all 0.12s", cursor: dragBlock ? "copy" : "default" }}
-                              onDragOver={e => handleDragOver(e, day, t)}
-                              onDragLeave={() => setDragOver(null)}
-                              onDrop={e => handleDrop(e, day, t, sec)}
-                            >
-                              {isDragTarget && <div style={{ fontSize: 10, color: theme.primary, fontWeight: 700, textAlign: "center", padding: 4 }}>Drop here</div>}
-                            </td>
-                          );
-
-                          const { code, name, type } = resolveSubjectDisplay(m, codeMap);
-                          const badgeBg = getBadgeBg(type, theme);
-
-                          return (
-                            <td
-                              key={day}
-                              style={{ border: "1px solid #ddd", textAlign: "center", verticalAlign: "middle", height: 44, background: isDragging ? "rgba(0,0,0,0.04)" : (lb ? theme.light2 : theme.light), opacity: isDragging ? 0.45 : 1, cursor: m.id ? "grab" : "default", transition: "all 0.12s", outline: isDragging ? `2px dashed ${theme.primary}` : "none" }}
-                              draggable={!!m.id}
-                              onDragStart={e => m.id && handleDragStart(e, m)}
-                              onDragOver={e => handleDragOver(e, day, t)}
-                              onDragLeave={() => setDragOver(null)}
-                              onDrop={e => handleDrop(e, day, t, sec)}
-                            >
-                              <div style={{ display: "inline-flex", alignItems: "center", background: badgeBg, color: "#fff", borderRadius: 4, padding: "2px 8px", fontSize: 10, fontWeight: 900, letterSpacing: 0.8, textTransform: "uppercase", marginBottom: 2 }}>
-                                {code || name}
-                              </div>
-                              {m.instructor && <div style={{ fontSize: 9, color: theme.primary, fontWeight: 700 }}>{m.instructor}</div>}
-                              <div style={{ fontSize: 9, color: "#475569" }}>{m.room}</div>
-                              <div style={{ fontSize: 9, color: lb ? theme.text : "#166534", fontWeight: 700 }}>{lb ? "🔬 Lab" : "📖 Lec"}</div>
-                              {m.id && <div style={{ fontSize: 8, color: "#94a3b8", marginTop: 2 }}>✥ drag</div>}
-                            </td>
-                          );
-                        })}
-                      </tr>
-                    );
-                })}
-                </tbody>
-              </table>
+                            return (
+                              <td
+                                key={day}
+                                rowSpan={rowSpan}
+                                style={{
+                                  ...printCellBox(rowSpan),
+                                  border: `1px solid #ddd`,
+                                  borderLeft: `5px solid ${sc.cellBorder}`,
+                                  textAlign: "center",
+                                  verticalAlign: "middle",
+                                  padding: "14px 10px",
+                                  background: sc.cellBg,
+                                }}
+                              >
+                                <div style={{ display: "inline-flex", alignItems: "center", background: sc.badgeBg, color: "#fff", borderRadius: 5, padding: "9px 18px", fontSize: 19, fontWeight: 900, letterSpacing: 0.8, textTransform: "uppercase", marginBottom: 6 }}>
+                                  {code || name}
+                                </div>
+                                {m.instructor && <div style={{ fontSize: 18, lineHeight: 1.3, color: sc.accentColor, fontWeight: 700 }}>{m.instructor}</div>}
+                                <div style={{ fontSize: 18, lineHeight: 1.3, color: "#475569" }}>{m.room}</div>
+                                <div style={{ fontSize: 18, lineHeight: 1.3, color: sc.accentColor, fontWeight: 700 }}>{lb ? "🔬 Lab" : "📖 Lec"}</div>
+                              </td>
+                            );
+                          })}
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+                <SignatureBlock/>
+              </div>
             </div>
-)}
+
+            {!collapsed[sec] && (
+              <div style={{ overflowX: "auto" }}>
+                <table style={{ width: "100%", borderCollapse: "collapse", tableLayout: "fixed", fontSize: 15 }}>
+                  <colgroup>
+                    <col style={{ width: "160px" }} />
+                    {DAYS.map(d => <col key={d} style={{ width: "calc((100% - 160px) / 7)" }} />)}
+                  </colgroup>
+                  <thead>
+                    <tr>
+                      <th style={{ background: theme.primary, color: "#fff", padding: "14px 16px", border: `1px solid ${theme.primary3 || theme.primary}`, textAlign: "center", fontSize: 14 }}>Time</th>
+                      {DAYS.map(d => (
+                        <th key={d} style={{ background: theme.primary, color: "#fff", padding: "14px 12px", border: `1px solid ${theme.primary3 || theme.primary}`, textAlign: "center", fontSize: 14 }}>{d}</th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {timeSlots.map(t => {
+                      const nextT = timeSlots[timeSlots.indexOf(t) + 1] ?? (t + 1);
+                      if (t === LUNCH_START) return (
+                        <tr key="lunch">
+                          <td style={{ background: theme.light, border: "1px solid #ddd", padding: "4px 8px", fontWeight: 700, fontSize: 13, textAlign: "center", verticalAlign: "middle", color: theme.primary, whiteSpace: "nowrap" }}>
+                            {fmtRange(t, nextT)}
+                          </td>
+                          {DAYS.map(day => <td key={day} style={{ border: "1px solid #ddd", textAlign: "center", verticalAlign: "middle", padding: "10px 12px", background: "#fef9c3" }}><span style={{ fontSize: 12, color: "#854d0e", fontWeight: 700 }}>🍽 Lunch</span></td>)}
+                        </tr>
+                      );
+                      if (t > LUNCH_START && t < LUNCH_END) return null;
+                      return (
+                        <tr key={t}>
+                          <td style={{ background: theme.light, border: "1px solid #ddd", padding: "10px 12px", fontWeight: 700, fontSize: 13, textAlign: "center", verticalAlign: "middle", color: theme.primary, whiteSpace: "nowrap" }}>{fmtRange(t, nextT)}</td>
+                          {DAYS.map(day => {
+                            const info = getCellSpanInfo(cls, day, t, timeSlots);
+                            if (info.kind === "covered") return null;
+
+                            const isDragTarget = dragOver?.day === day && dragOver?.time === t;
+
+                            if (info.kind === "empty") return (
+                              <td
+                                key={day}
+                                style={{
+                                  border: `2px solid ${isDragTarget ? theme.primary : "#ddd"}`,
+                                  padding: "10px 12px",
+                                  verticalAlign: "middle",
+                                  background: isDragTarget ? theme.light2 : "#fff",
+                                  transition: "all 0.12s",
+                                  cursor: dragBlock ? "copy" : "default",
+                                }}
+                                onDragOver={e => handleDragOver(e, day, t)}
+                                onDragLeave={() => setDragOver(null)}
+                                onDrop={e => handleDrop(e, day, t, sec)}
+                              >
+                                {isDragTarget && (
+                                  <div style={{ fontSize: 11, color: theme.primary, fontWeight: 700, textAlign: "center", padding: 4 }}>
+                                    Drop here
+                                  </div>
+                                )}
+                              </td>
+                            );
+
+                            const m = info.block;
+                            const rowSpan = info.span;
+
+                            if (m.is_break) return (
+                              <td key={day} rowSpan={rowSpan} style={{ border: "1px solid #ddd", textAlign: "center", verticalAlign: "middle", padding: "10px 12px", background: "#fef9c3" }}>
+                                <span style={{ fontSize: 14, color: "#854d0e", fontWeight: 700 }}>☕ Break</span>
+                              </td>
+                            );
+
+                            const isDragging = dragBlock && m.id === dragBlock.id;
+                            const lb = m.roomType === "Laboratory";
+                            const { code, name, type } = resolveSubjectDisplay(m, codeMap);
+                            const sc = getSubjectColor(m.subject, type, m.roomType);
+
+                            return (
+                              <td
+                                key={day}
+                                rowSpan={rowSpan}
+                                style={{
+                                  border: `1px solid #ddd`,
+                                  borderLeft: `4px solid ${sc.cellBorder}`,
+                                  textAlign: "center",
+                                  verticalAlign: "middle",
+                                  padding: "10px 12px",
+                                  background: isDragging ? "rgba(0,0,0,0.04)" : sc.cellBg,
+                                  opacity: isDragging ? 0.45 : 1,
+                                  cursor: m.id ? "grab" : "default",
+                                  transition: "all 0.12s",
+                                  outline: isDragging ? `2px dashed ${theme.primary}` : "none",
+                                }}
+                                draggable={!!m.id}
+                                onDragStart={e => m.id && handleDragStart(e, m)}
+                                onDragOver={e => handleDragOver(e, day, t)}
+                                onDragLeave={() => setDragOver(null)}
+                                onDrop={e => handleDrop(e, day, t, sec)}
+                                onDoubleClick={() => m.id && setEditingBlock(m)}
+                              >
+                                <div style={{ display: "inline-flex", alignItems: "center", background: sc.badgeBg, color: "#fff", borderRadius: 4, padding: "4px 12px", fontSize: 13, fontWeight: 900, letterSpacing: 0.8, textTransform: "uppercase", marginBottom: 3 }}>
+                                  {code || name}
+                                </div>
+                                {m.instructor && <div style={{ fontSize: 11.5, color: sc.accentColor, fontWeight: 700 }}>{m.instructor}</div>}
+                                <div style={{ fontSize: 11.5, color: "#475569" }}>{m.room}</div>
+                                <div style={{ fontSize: 11.5, color: sc.accentColor, fontWeight: 700 }}>{lb ? "🔬 Lab" : "📖 Lec"}</div>
+                                {m.id && (
+                                  <div style={{ fontSize: 10, color: "#94a3b8", marginTop: 3 }}>✥ drag</div>
+                                )}
+                              </td>
+                            );
+                          })}
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            )}
           </div>
         );
       })}
     </div>
   );
 }
-
-
-
 
 
 
@@ -3130,11 +3719,55 @@ function InlineRoomGrid({ instructorSchedules, studentSchedules, allSchedules, a
  const handlePrint = (room) => {
    const win = window.open("", "_blank");
     const content = document.getElementById(`inline-room-print-${room.replace(/\s/g, "-")}`)?.innerHTML || "";
-   win.document.write(`<!DOCTYPE html><html><head><title>Room Schedule - ${room}</title><style>*{box-sizing:border-box;margin:0;padding:0;}body{font-family:Arial,sans-serif;font-size:10pt;color:#000;}.page{width:297mm;padding:14mm;margin:0 auto;}table{width:100%;border-collapse:collapse;table-layout:fixed;}th:first-child,td:first-child{width:80px;}th{background:${theme.primary};color:#fff;font-weight:bold;padding:6px 4px;text-align:center;border:1px solid ${theme.primary3||theme.primary};font-size:8pt;}td{border:1px solid #ddd;padding:4px;text-align:center;vertical-align:middle;height:40px;}tr{page-break-inside:avoid;}thead{display:table-header-group;}@media print{@page{margin:10mm;size:A4 landscape;}body{-webkit-print-color-adjust:exact;print-color-adjust:exact;}}</style></head><body><div class="page">${content}</div></body></html>`);
+   win.document.write(`<!DOCTYPE html><html><head><title>Room Schedule - ${room}</title><style>
+*{box-sizing:border-box;margin:0;padding:0;}
+body{font-family:Arial,sans-serif;font-size:10pt;color:#000;}
+.print-page{
+  width:281mm;
+  height:194mm;
+  overflow:hidden;
+  position:relative;
+}
+.print-inner{ transform-origin: top left; }
+table{width:100%;border-collapse:collapse;table-layout:fixed;}
+th:first-child,td:first-child{width:80px;}
+th{background:${theme.primary};color:#fff;font-weight:bold;padding:5px 4px;text-align:center;border:1px solid ${theme.primary3||theme.primary};font-size:8pt;}
+td{border:1px solid #ddd;padding:3px;text-align:center;vertical-align:middle;height:34px;font-size:8pt;}
+thead{display:table-header-group;}
+@media print{@page{margin:8mm;size:A4 landscape;}body{-webkit-print-color-adjust:exact;print-color-adjust:exact;}}
+</style></head><body>
+<div class="print-page" id="printPage"><div class="print-inner" id="printInner">${content}</div></div>
+<script>
+  function fitAndPrint() {
+    var outer = document.getElementById('printPage');
+    var inner = document.getElementById('printInner');
+    var availH = outer.clientHeight;
+    var naturalH = inner.scrollHeight;
+    if (naturalH > availH) {
+      var scale = (availH / naturalH) * 0.98;
+      inner.style.transform = 'scale(' + scale + ')';
+      inner.style.width = (100 / scale) + '%';
+    }
+    setTimeout(function () { window.print(); window.close(); }, 150);
+  }
+  var imgs = Array.prototype.slice.call(document.images);
+  var pending = imgs.filter(function (img) { return !img.complete; }).length;
+  if (pending === 0) {
+    fitAndPrint();
+  } else {
+    var done = 0;
+    imgs.forEach(function (img) {
+      img.addEventListener('load', check);
+      img.addEventListener('error', check);
+    });
+    function check() { done++; if (done >= pending) fitAndPrint(); }
+    setTimeout(fitAndPrint, 2000);
+  }
+</script>
+</body></html>`);
     win.document.close(); win.focus();
-    setTimeout(() => { win.print(); win.close(); }, 700);
   };
-  
+
 return (
     <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
      {toast && (
@@ -3197,8 +3830,13 @@ return (
 
       {displayRooms.map(room => {
         const isLab   = LAB_ROOMS.includes(room);
-        const blocks  = allBlocks.filter(b => b.room === room).map(b => ({ ...b, start: Number(b.start), end: Number(b.end) }));
+        const rawBlocks = allBlocks.filter(b => b.room === room).map(b => ({ ...b, start: Number(b.start), end: Number(b.end) }));
+        const blocks = DAYS.flatMap(day => {
+          const dayBlocks = rawBlocks.filter(b => b.day === day);
+          return dayBlocks.length ? insertBreaks(dayBlocks) : [];
+        });
         const timeSlots = buildPrintTimeSlots(blocks);
+
 
         return (
           <div key={room} style={{ border: `1px solid ${theme.border}`, borderRadius: 10, overflow: "hidden" }}>
@@ -3242,76 +3880,56 @@ return (
                   {DAYS.map(d => <th key={d} style={{ background: theme.primary, color: "#fff", border: `1px solid ${theme.primary3 || theme.primary}`, padding: "6px 4px" }}>{d}</th>)}
                 </tr></thead>
                 <tbody>
-                  {timeSlots.map(t => {
-                    if (t === LUNCH_START) return (
-                      <tr key="lunch">
-                        <td style={{ background: "#fef9c3", border: "1px solid #ddd", padding: "3px 4px", fontWeight: 700, fontSize: 7.5, textAlign: "center", color: "#854d0e", height: 28 }}>{fmtRange(LUNCH_START, LUNCH_END)}</td>
-                        {DAYS.map(day => <td key={day} style={{ border: "1px solid #ddd", textAlign: "center", height: 28, background: "#fef9c3" }}><span style={{ fontSize: 8, color: "#854d0e", fontWeight: 700 }}>🍽 Lunch</span></td>)}
-                      </tr>
-                    );
-                    if (t > LUNCH_START && t < LUNCH_END) return null;
-                    const nextT = timeSlots[timeSlots.indexOf(t) + 1] ?? (t + 1);
-                    return (
-                      <tr key={t}>
-                        <td style={{ background: theme.light, border: "1px solid #ddd", padding: "3px 4px", fontWeight: 700, fontSize: 7.5, textAlign: "center", color: theme.primary, height: 40 }}>{fmtRange(t, nextT)}</td>
-                    {DAYS.map(day => {
-                          const info = getCellSpanInfo(blocks, day, t, timeSlots);
-                          if (info.kind === "covered") return null;
+  {timeSlots.map(t => {
+    if (t === LUNCH_START) return (
+      <tr key="lunch">
+        <td style={{ background: "#fef9c3", border: "1px solid #ddd", padding: "3px 4px", fontWeight: 700, fontSize: 7.5, textAlign: "center", color: "#854d0e", height: 28 }}>{fmtRange(LUNCH_START, LUNCH_END)}</td>
+        {DAYS.map(day => <td key={day} style={{ border: "1px solid #ddd", textAlign: "center", height: 28, background: "#fef9c3" }}><span style={{ fontSize: 8, color: "#854d0e", fontWeight: 700 }}>🍽 Lunch</span></td>)}
+      </tr>
+    );
+    if (t > LUNCH_START && t < LUNCH_END) return null;
+    const nextT = timeSlots[timeSlots.indexOf(t) + 1] ?? (t + 1);
+    return (
+      <tr key={t}>
+        <td style={{ background: theme.light, border: "1px solid #ddd", padding: "3px 4px", fontWeight: 700, fontSize: 7.5, textAlign: "center", color: theme.primary, height: 40 }}>{fmtRange(t, nextT)}</td>
+        {DAYS.map(day => {
+          const info = getCellSpanInfo(blocks, day, t, timeSlots);
+          if (info.kind === "covered") return null;
 
-                          const isDragTarget = dragOver?.day === day && dragOver?.time === t;
+          if (info.kind === "empty") return (
+            <td key={day} style={{ border: "1px solid #ddd", height: 40, background: "#fff" }}/>
+          );
 
-                          if (info.kind === "empty") return (
-                            <td
-                              key={day}
-                              style={{ border: `2px solid ${isDragTarget ? theme.primary : "#ddd"}`, height: 44, background: isDragTarget ? theme.light2 : "#fff", transition: "all 0.12s", cursor: dragBlock ? "copy" : "default" }}
-                              onDragOver={e => handleDragOver(e, day, t)}
-                              onDragLeave={() => setDragOver(null)}
-                              onDrop={e => handleDrop(e, day, t, sec)}
-                            >
-                              {isDragTarget && <div style={{ fontSize: 10, color: theme.primary, fontWeight: 700, textAlign: "center", padding: 4 }}>Drop here</div>}
-                            </td>
-                          );
+          const m = info.block;
+          const rowSpan = info.span;
 
-                          const m = info.block;
-                          const rowSpan = info.span;
+          if (m.is_break) return (
+            <td key={day} rowSpan={rowSpan} style={{ border: "1px solid #ddd", textAlign: "center", height: 40 * rowSpan, background: "#fef9c3" }}>
+              <span style={{ fontSize: 8, color: "#854d0e", fontWeight: 700 }}>☕ Break</span>
+            </td>
+          );
 
-                          if (m.is_break) return (
-                            <td key={day} rowSpan={rowSpan} style={{ border: "1px solid #ddd", textAlign: "center", height: 44 * rowSpan, background: "#fef9c3" }}>
-                              <span style={{ fontSize: 10, color: "#854d0e", fontWeight: 700 }}>☕ Break</span>
-                            </td>
-                          );
+          const lb = isLab;
+          const { code, name, type } = resolveSubjectDisplay(m, codeMap);
+          const badgeBg = getBadgeBg(type, theme);
 
-                          const isDragging = dragBlock && m.id === dragBlock.id;
-                          const lb = m.roomType === "Laboratory";
-                          const { code, name, type } = resolveSubjectDisplay(m, codeMap);
-                          const badgeBg = getBadgeBg(type, theme);
-
-                          return (
-                            <td
-                              key={day}
-                              rowSpan={rowSpan}
-                              style={{ border: "1px solid #ddd", textAlign: "center", verticalAlign: "middle", height: 44 * rowSpan, background: isDragging ? "rgba(0,0,0,0.04)" : (lb ? theme.light2 : theme.light), opacity: isDragging ? 0.45 : 1, cursor: m.id ? "grab" : "default", transition: "all 0.12s", outline: isDragging ? `2px dashed ${theme.primary}` : "none" }}
-                              draggable={!!m.id}
-                              onDragStart={e => m.id && handleDragStart(e, m)}
-                              onDragOver={e => handleDragOver(e, day, t)}
-                              onDragLeave={() => setDragOver(null)}
-                         onDrop={e => handleDrop(e, day, t, room)}
-                            >
-                              <div style={{ display: "inline-flex", alignItems: "center", background: badgeBg, color: "#fff", borderRadius: 4, padding: "2px 8px", fontSize: 10, fontWeight: 900, letterSpacing: 0.8, textTransform: "uppercase", marginBottom: 2 }}>
-                                {code || name}
-                              </div>
-                              {m.instructor && <div style={{ fontSize: 9, color: theme.primary, fontWeight: 700 }}>{m.instructor}</div>}
-                              <div style={{ fontSize: 9, color: "#475569" }}>{m.room}</div>
-                              <div style={{ fontSize: 9, color: lb ? theme.text : "#166534", fontWeight: 700 }}>{lb ? "🔬 Lab" : "📖 Lec"}</div>
-                              {m.id && <div style={{ fontSize: 8, color: "#94a3b8", marginTop: 2 }}>✥ drag</div>}
-                            </td>
-                          );
-                        })}
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
+          return (
+            <td key={day} rowSpan={rowSpan} style={{ border: "1px solid #ddd", textAlign: "center", verticalAlign: "middle", height: 40 * rowSpan, background: lb ? theme.light2 : "#f0fdf4" }}>
+              <div style={{ display: "inline-flex", alignItems: "center", background: badgeBg, color: "#fff", borderRadius: 4, padding: "2px 8px", fontSize: 10, fontWeight: 900, letterSpacing: 0.8, textTransform: "uppercase", marginBottom: 2 }}>
+                {code || name}
+              </div>
+              {m.instructor && <div style={{ fontSize: 9, color: theme.primary, fontWeight: 700 }}>{m.instructor}</div>}
+              {m.section && <div style={{ fontSize: 9, color: "#475569" }}>{m.section}</div>}
+              <div style={{ fontSize: 9, color: lb ? theme.text : "#166534", fontWeight: 700 }}>{lb ? "🔬 Lab" : "📖 Lec"}</div>
+            </td>
+          );
+        })}
+      </tr>
+    );
+  })}
+</tbody>
+    </table>
+     <SignatureBlock/>
             </div>
             
            {!collapsed[room] && (
@@ -3927,7 +4545,27 @@ const handleLinkedMove = async (block, suggestion, sourceTable) => {
 
     return (
       <div style={cardStyle}>
-        {toast && <ConflictToast conflicts={toast} allSchedules={allRealSchedules} onClose={()=>setToast(null)} onMoveSchedule={handleMoveSchedule} instructorPool={instructorPoolList}/>}
+{toast && (
+          <ConflictToast
+            conflicts={toast}
+            allSchedules={allRealSchedules}
+            onClose={() => setToast(null)}
+            onMoveSchedule={async (block, sg) => {
+              if (block.id) {
+                // Conflict involves an already-saved schedule — apply the fix
+                // the same way the drag-and-drop grid does.
+                await handleLinkedMove(block, sg, "instructor");
+              } else {
+                // Conflict involves an entry still pending on this form —
+                // move it inside the grid so the change is visible right
+                // away and gets saved when "Save Weekly Schedule" is clicked.
+                moveGridBlock(setGrid, block, sg, { section: block.section || "" });
+              }
+              setToast(null);
+            }}
+            instructorPool={instructorPoolList}
+          />
+        )}
         <div style={{background:theme.headerBg,borderRadius:10,padding:"16px 22px",marginBottom:4,display:"flex",alignItems:"center",gap:14}}>
           <div style={{fontSize:28}}>📋</div>
           <div><div style={{color:"#fff",fontWeight:800,fontSize:16}}>Instructor Load</div><div style={{color:"rgba(255,255,255,0.65)",fontSize:12,marginTop:2}}>Enter weekly schedule per instructor — {theme.code}</div></div>
@@ -4113,15 +4751,38 @@ const handleLinkedMove = async (block, suggestion, sourceTable) => {
       setGenerating(false);
     };
 
-    const sectionsByYear = [1,2,3,4].reduce((acc,y)=>{
+const sectionsByYear = [1,2,3,4].reduce((acc,y)=>{
       acc[y] = sectionPoolList.filter(s => s.year_level === y);
       return acc;
     },{});
     const yearLabels = { 1:"🌱 First Year", 2:"🌿 Second Year", 3:"🌳 Third Year", 4:"🎓 Fourth Year" };
+    // Sections that already have a saved schedule — shown disabled so they
+    // can't be picked again and silently overwritten.
+    const scheduledSectionNames = new Set(
+      data.studentSchedules.filter(s => !s.is_break && s.section?.trim()).map(s => normName(s.section))
+    );
+
+
+
 
     return (
       <div style={cardStyle}>
-        {toast && <ConflictToast conflicts={toast} allSchedules={allRealSchedules} onClose={()=>setToast(null)} onMoveSchedule={null} instructorPool={instructorPoolList}/>}
+       {toast && (
+          <ConflictToast
+            conflicts={toast}
+            allSchedules={allRealSchedules}
+            onClose={() => setToast(null)}
+            onMoveSchedule={async (block, sg) => {
+              if (block.id) {
+                await handleLinkedMove(block, sg, "student");
+              } else {
+                moveGridBlock(setStudentGrid, block, sg, { instructor: block.instructor || "" });
+              }
+              setToast(null);
+            }}
+            instructorPool={instructorPoolList}
+          />
+        )}
         <div style={{background:theme.headerBg,borderRadius:10,padding:"16px 22px",marginBottom:4,display:"flex",alignItems:"center",justifyContent:"space-between",gap:14,flexWrap:"wrap"}}>
           <div style={{display:"flex",alignItems:"center",gap:14}}>
             <div style={{fontSize:28}}>🎓</div>
@@ -4144,7 +4805,14 @@ const handleLinkedMove = async (block, suggestion, sourceTable) => {
                 if (!list?.length) return null;
                 return (
                   <optgroup key={y} label={yearLabels[y]}>
-                    {list.map(s => <option key={s.id} value={s.section_name}>{s.section_name}</option>)}
+                    {list.map(s => {
+                      const already = scheduledSectionNames.has(normName(s.section_name));
+                      return (
+                        <option key={s.id} value={s.section_name} disabled={already}>
+                          {already ? `✓ ${s.section_name} (already scheduled)` : s.section_name}
+                        </option>
+                      );
+                    })}
                   </optgroup>
                 );
               })}
