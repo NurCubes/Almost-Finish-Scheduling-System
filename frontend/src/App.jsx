@@ -34,7 +34,7 @@ const YEAR_LEVEL_LABELS = {
 // room than a bare time-slot row would. Locking every row — and every
 // rowSpan cell to an exact multiple of this value — keeps the grid perfectly
 // rectangular no matter how many/how busy the blocks are.
-const PRINT_ROW_H = 46;
+const PRINT_ROW_H = 84;
 
 function printCellBox(rowSpan = 1, extra = {}) {
   return {
@@ -1667,12 +1667,12 @@ function SectionPoolPage({ theme, activeSemester }) {
 /* ══════════════════════════════════════════════════════════════
    ══ SUBJECT SETUP PAGE — MODIFIED: added hour_load field ══
    ══════════════════════════════════════════════════════════════ */
+
 function SubjectSetupPage({ theme, activeSemester, allSchedules = [] }) {
   const [subjects,       setSubjects]       = useState([]);
   const [loading,        setLoading]        = useState(true);
   const [editId,         setEditId]         = useState(null);
-  // ── MODIFIED: added hour_load to form (0 = unlimited) ──
-  const [form,           setForm]           = useState({ subject_name:"", subject_code:"", subject_type:"Major", year_level:1, units:3, hour_load:0 });
+  const [form,           setForm]           = useState({ subject_name:"", subject_code:"", subject_type:"Major", year_level:1, units:3 });
   const [err,            setErr]            = useState("");
   const [saving,         setSaving]         = useState(false);
   const [deleteConfirm,  setDeleteConfirm]  = useState(null);
@@ -1692,13 +1692,13 @@ function SubjectSetupPage({ theme, activeSemester, allSchedules = [] }) {
   }
 
   function resetForm() {
-    setForm({ subject_name:"", subject_code:"", subject_type:"Major", year_level:1, units:3, hour_load:0 });
+    setForm({ subject_name:"", subject_code:"", subject_type:"Major", year_level:1, units:3 });
     setEditId(null); setErr("");
   }
 
   function startEdit(s) {
     setEditId(s.id);
-    setForm({ subject_name:s.subject_name, subject_code:s.subject_code||"", subject_type:s.subject_type, year_level:s.year_level, units:s.units, hour_load:s.hour_load||0 });
+    setForm({ subject_name:s.subject_name, subject_code:s.subject_code||"", subject_type:s.subject_type, year_level:s.year_level, units:s.units });
     setErr("");
     window.scrollTo({ top:0, behavior:"smooth" });
   }
@@ -1730,13 +1730,6 @@ function SubjectSetupPage({ theme, activeSemester, allSchedules = [] }) {
     } catch { alert("Network error."); }
   }
 
-  // ── Helper: compute how many hours a subject has been scheduled ──
-  function getConsumedHours(subjectName) {
-    return allSchedules
-      .filter(s => !s.is_break && normName(s.subject) === normName(subjectName))
-      .reduce((sum, s) => sum + (Number(s.end) - Number(s.start)), 0);
-  }
-
   const inpStyle = { padding:"9px 12px", border:`1.5px solid ${theme.border}`, borderRadius:8, fontSize:14, outline:"none", background:"#fff", color:"#0f172a", width:"100%", boxSizing:"border-box" };
   const btnPrimary   = { padding:"10px 22px", background:theme.primary, color:"#fff", border:"none", borderRadius:8, cursor:"pointer", fontSize:14, fontWeight:600 };
   const btnSecondary = { padding:"10px 18px", background:theme.light, color:theme.text, border:`1px solid ${theme.border}`, borderRadius:8, cursor:"pointer", fontSize:14 };
@@ -1751,14 +1744,9 @@ function SubjectSetupPage({ theme, activeSemester, allSchedules = [] }) {
 
   const yearHasData = (y) => byYear[y].ge.length > 0 || byYear[y].major.length > 0;
 
-  // ── MODIFIED: SubjectRow now shows hour_load + consumed hours bar ──
   const SubjectRow = ({ s, i }) => {
     const icon = getSubjectIcon(s.subject_name);
     const isGE = s.subject_type === "GE";
-    const hourLoad = s.hour_load || 0;
-    const consumed = getConsumedHours(s.subject_name);
-    const pct = hourLoad > 0 ? Math.min(100, Math.round((consumed / hourLoad) * 100)) : 0;
-    const overLimit = hourLoad > 0 && consumed >= hourLoad;
     return (
       <tr style={{ background: editId===s.id ? theme.light2 : (i%2===0?"#fff":"#f8fafc") }}>
         <td style={{padding:"10px 14px",borderBottom:`1px solid ${theme.light2}`}}>
@@ -1776,29 +1764,6 @@ function SubjectSetupPage({ theme, activeSemester, allSchedules = [] }) {
           </div>
         </td>
         <td style={{padding:"10px 12px",borderBottom:`1px solid ${theme.light2}`,textAlign:"center",fontWeight:700,color:theme.primary}}>{s.units}</td>
-        {/* ── MODIFIED: Hour load column ── */}
-        <td style={{padding:"10px 14px",borderBottom:`1px solid ${theme.light2}`,minWidth:160}}>
-          {hourLoad > 0 ? (
-            <div>
-              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:4}}>
-                <span style={{fontSize:11,fontWeight:700,color:overLimit?"#ef4444":theme.text}}>
-                  {consumed}h / {hourLoad}h
-                </span>
-                <span style={{fontSize:10,fontWeight:700,padding:"1px 7px",borderRadius:20,
-                  background:overLimit?"#fee2e2":pct>=80?"#fef9c3":"#dcfce7",
-                  color:overLimit?"#dc2626":pct>=80?"#854d0e":"#166534",
-                  border:`1px solid ${overLimit?"#fca5a5":pct>=80?"#fde68a":"#86efac"}`}}>
-                  {overLimit ? "🔴 Full" : pct >= 80 ? "🟡 Near full" : "🟢 Available"}
-                </span>
-              </div>
-              <div style={{background:"#e2e8f0",borderRadius:99,height:6,overflow:"hidden"}}>
-                <div style={{width:`${pct}%`,height:"100%",borderRadius:99,background:overLimit?"#ef4444":pct>=80?"#f59e0b":"#16a34a",transition:"width 0.3s"}}/>
-              </div>
-            </div>
-          ) : (
-            <span style={{fontSize:11,color:"#94a3b8",fontStyle:"italic"}}>No limit set</span>
-          )}
-        </td>
         <td style={{padding:"10px 12px",borderBottom:`1px solid ${theme.light2}`,textAlign:"center"}}>
           <div style={{display:"flex",gap:6,justifyContent:"center"}}>
             <button onClick={()=>startEdit(s)} style={{padding:"5px 12px",background:theme.light,color:theme.primary,border:`1px solid ${theme.border}`,borderRadius:6,cursor:"pointer",fontSize:11,fontWeight:600}}>✏</button>
@@ -1816,14 +1781,12 @@ function SubjectSetupPage({ theme, activeSemester, allSchedules = [] }) {
     );
   };
 
-  // ── MODIFIED: table header now includes Hour Load column ──
   const TwoColTable = ({ yearLevel, geList, majorList }) => {
     const showGE = hasGE(yearLevel, activeSemester);
     const tableHeader = (borderColor, bg, textColor) => (
       <thead><tr style={{background:bg}}>
         <th style={{padding:"9px 14px",textAlign:"left",borderBottom:`1px solid ${borderColor}`,fontWeight:600,color:textColor}}>Code + Description</th>
         <th style={{padding:"9px 12px",textAlign:"center",borderBottom:`1px solid ${borderColor}`,fontWeight:600,color:textColor,width:70}}>Units</th>
-        <th style={{padding:"9px 12px",textAlign:"left",borderBottom:`1px solid ${borderColor}`,fontWeight:600,color:textColor,width:180}}>Hour Load</th>
         <th style={{padding:"9px 12px",textAlign:"center",borderBottom:`1px solid ${borderColor}`,fontWeight:600,color:textColor,width:100}}>Actions</th>
       </tr></thead>
     );
@@ -1881,8 +1844,7 @@ function SubjectSetupPage({ theme, activeSemester, allSchedules = [] }) {
             <input style={{...inpStyle,fontWeight:900,letterSpacing:.8,textTransform:"uppercase",border:`2px solid ${theme.primary}`,color:theme.primary,fontSize:15}} placeholder="e.g. SIA, CC101" value={form.subject_code} onChange={e=>setForm(f=>({...f,subject_code:e.target.value.toUpperCase()}))}/>
           </div>
         </div>
-        {/* ── MODIFIED: added Hour Load field in the form grid ── */}
-        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr 1fr",gap:12,alignItems:"end"}}>
+        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:12,alignItems:"end"}}>
           <div>
             <label style={{fontSize:12,fontWeight:600,color:"#374151",display:"block",marginBottom:5}}>Type {!showGEOption && <span style={{color:"#94a3b8",fontWeight:400,fontSize:11}}>(Major only)</span>}</label>
             <select style={{...inpStyle,opacity:showGEOption?1:0.5}} value={form.subject_type} disabled={!showGEOption} onChange={e=>setForm(f=>({...f,subject_type:e.target.value}))}>
@@ -1900,18 +1862,6 @@ function SubjectSetupPage({ theme, activeSemester, allSchedules = [] }) {
             <label style={{fontSize:12,fontWeight:600,color:"#374151",display:"block",marginBottom:5}}>Units</label>
             <input type="number" min={1} max={9} style={inpStyle} value={form.units} onChange={e=>setForm(f=>({...f,units:parseInt(e.target.value)||1}))}/>
           </div>
-          <div>
-            <label style={{fontSize:12,fontWeight:600,color:"#374151",display:"block",marginBottom:5}}>
-              Hour Load <span style={{color:"#94a3b8",fontWeight:400,fontSize:11}}>(0 = unlimited)</span>
-            </label>
-            <input
-              type="number" min={0} max={200}
-              style={{...inpStyle, border:`2px solid ${form.hour_load > 0 ? "#f59e0b" : theme.border}`, color: form.hour_load > 0 ? "#854d0e" : "#0f172a"}}
-              value={form.hour_load}
-              onChange={e=>setForm(f=>({...f,hour_load:parseInt(e.target.value)||0}))}
-              placeholder="e.g. 18"
-            />
-          </div>
         </div>
         {(form.subject_code || form.subject_name) && (
           <div style={{marginTop:12,padding:"12px 16px",background:theme.light2,border:`1.5px solid ${theme.border}`,borderRadius:8,display:"flex",alignItems:"center",gap:14}}>
@@ -1920,11 +1870,6 @@ function SubjectSetupPage({ theme, activeSemester, allSchedules = [] }) {
               {form.subject_code && <span style={{display:"inline-block",background:form.subject_type==="GE"?"linear-gradient(135deg,#65a30d,#84cc16)":`linear-gradient(135deg,${theme.primary},${theme.primary3||theme.primary})`,color:"#fff",borderRadius:6,padding:"4px 13px",fontSize:14,fontWeight:900,letterSpacing:1.2,textTransform:"uppercase",boxShadow:"0 2px 8px rgba(0,0,0,0.18)"}}>{form.subject_code}</span>}
               {form.subject_name && <span style={{fontSize:11,color:"#475569"}}>{form.subject_name}</span>}
             </div>
-            {form.hour_load > 0 && (
-              <div style={{marginLeft:"auto",padding:"6px 14px",background:"#fef9c3",border:"1px solid #fde68a",borderRadius:8,fontSize:12,color:"#854d0e",fontWeight:700}}>
-                ⏱ Max {form.hour_load} hrs/semester
-              </div>
-            )}
           </div>
         )}
         <div style={{marginTop:6,padding:"8px 12px",background:theme.light2,border:`1px solid ${theme.border}`,borderRadius:7,fontSize:12,color:theme.text}}>📅 Saving under <strong>{activeSemester}</strong>.</div>
@@ -1962,13 +1907,12 @@ function InstructorPoolPage({ theme, activeSemester, allSchedules = [] }) {
   const [instructors,    setInstructors]   = useState([]);
   const [loading,        setLoading]       = useState(true);
   const [editId,         setEditId]        = useState(null);
-  // ── MODIFIED: added max_load to form ──
   const [form,           setForm]          = useState({ name:"", department:theme.code, email:"", employment_type:"Regular", max_load:0 });
   const [err,            setErr]           = useState("");
   const [saving,         setSaving]        = useState(false);
   const [deleteConfirm,  setDeleteConfirm] = useState(null);
 
-  const EMP_TYPES = ["Regular", "Part-time"];
+  const EMP_TYPES = ["Regular", "Part-time", "Contractual"];
 
   const DEPT_BADGE_COLORS = {
     "BSIT":  { bg:"#dbeafe", color:"#1d4ed8", border:"#bfdbfe" },
@@ -1979,6 +1923,12 @@ function InstructorPoolPage({ theme, activeSemester, allSchedules = [] }) {
     "BEED":  { bg:"#ffedd5", color:"#9a3412", border:"#fed7aa" },
     "BSCpE": { bg:"#e0f2fe", color:"#0369a1", border:"#bae6fd" },
     "BSME":  { bg:"#fef3c7", color:"#92400e", border:"#fde68a" },
+  };
+
+  const EMP_TYPE_COLORS = {
+    "Regular": { bg:"#dcfce7", color:"#166534", border:"#86efac", icon:"🏛", label:"Regular" },
+    "Part-time": { bg:"#fef9c3", color:"#854d0e", border:"#fde68a", icon:"⏱", label:"Part-time" },
+    "Contractual": { bg:"#e0e7ff", color:"#3730a3", border:"#c7d2fe", icon:"📋", label:"Contractual" },
   };
 
   function getDeptBadgeStyle(deptCode) {
@@ -2002,7 +1952,7 @@ function InstructorPoolPage({ theme, activeSemester, allSchedules = [] }) {
 
   function startEdit(inst) {
     setEditId(inst.id);
-    const empType = (inst.employment_type === "Permanent" ? "Regular" : inst.employment_type) || "Regular";
+    const empType = inst.employment_type === "Permanent" ? "Regular" : (inst.employment_type || "Regular");
     setForm({ name:inst.name, department:inst.department||theme.code, email:inst.email||"", employment_type:empType, max_load:inst.max_load||0 });
     setErr(""); window.scrollTo({ top:0, behavior:"smooth" });
   }
@@ -2031,7 +1981,6 @@ function InstructorPoolPage({ theme, activeSemester, allSchedules = [] }) {
     } catch { alert("Network error."); }
   }
 
-  // ── MODIFIED: compute current scheduled hours for an instructor from allSchedules ──
   function getCurrentLoad(instName) {
     return allSchedules
       .filter(s => !s.is_break && normName(s.instructor) === normName(instName))
@@ -2042,10 +1991,19 @@ function InstructorPoolPage({ theme, activeSemester, allSchedules = [] }) {
   const btnPrimary   = { padding:"10px 22px", background:theme.primary, color:"#fff", border:"none", borderRadius:8, cursor:"pointer", fontSize:14, fontWeight:600 };
   const btnSecondary = { padding:"10px 18px", background:theme.light, color:theme.text, border:`1px solid ${theme.border}`, borderRadius:8, cursor:"pointer", fontSize:14 };
 
-  function displayEmpType(raw) { if (!raw || raw === "Permanent") return "Regular"; return raw; }
+  function displayEmpType(raw) { 
+    if (!raw || raw === "Permanent") return "Regular"; 
+    return raw; 
+  }
+
+  function getEmpTypeBadgeStyle(raw) {
+    const empType = displayEmpType(raw);
+    return EMP_TYPE_COLORS[empType] || EMP_TYPE_COLORS["Regular"];
+  }
 
   const regular  = instructors.filter(i => displayEmpType(i.employment_type) === "Regular");
   const parttime = instructors.filter(i => displayEmpType(i.employment_type) === "Part-time");
+  const contractual = instructors.filter(i => displayEmpType(i.employment_type) === "Contractual");
 
   const DeptBadge = ({ deptCode }) => {
     if (!deptCode) return null;
@@ -2053,7 +2011,6 @@ function InstructorPoolPage({ theme, activeSemester, allSchedules = [] }) {
     return <span style={{padding:"2px 9px",borderRadius:20,fontSize:10,fontWeight:800,background:style.bg,color:style.color,border:`1px solid ${style.border}`,letterSpacing:.3,whiteSpace:"nowrap"}}>🏛 {deptCode}</span>;
   };
 
-  // ── MODIFIED: InstructorTable now includes Hour Load column ──
   const InstructorTable = ({ list, emptyMsg }) => (
     list.length === 0 ? <div style={{padding:"14px 18px",textAlign:"center",color:"#94a3b8",fontSize:13}}>{emptyMsg}</div> : (
       <table style={{width:"100%",borderCollapse:"collapse",fontSize:13}}>
@@ -2062,13 +2019,12 @@ function InstructorPoolPage({ theme, activeSemester, allSchedules = [] }) {
           <th style={{padding:"9px 12px",textAlign:"center",borderBottom:`1px solid ${theme.light2}`,fontWeight:600,color:theme.text,width:110}}>Department</th>
           <th style={{padding:"9px 12px",textAlign:"center",borderBottom:`1px solid ${theme.light2}`,fontWeight:600,color:theme.text,width:130}}>Employment</th>
           <th style={{padding:"9px 12px",textAlign:"left",borderBottom:`1px solid ${theme.light2}`,fontWeight:600,color:theme.text}}>Email</th>
-          {/* ── MODIFIED: Hour Load column header ── */}
           <th style={{padding:"9px 12px",textAlign:"left",borderBottom:`1px solid ${theme.light2}`,fontWeight:600,color:theme.text,width:190}}>Hour Load</th>
           <th style={{padding:"9px 12px",textAlign:"center",borderBottom:`1px solid ${theme.light2}`,fontWeight:600,color:theme.text,width:110}}>Actions</th>
         </tr></thead>
         <tbody>{list.map((inst,i)=>{
-          const empLabel=displayEmpType(inst.employment_type);
-          const isReg=empLabel==="Regular";
+          const empLabel = displayEmpType(inst.employment_type);
+          const empStyle = getEmpTypeBadgeStyle(inst.employment_type);
           const maxLoad = inst.max_load || 0;
           const currentLoad = getCurrentLoad(inst.name);
           const remaining = maxLoad > 0 ? Math.max(0, maxLoad - currentLoad) : null;
@@ -2078,9 +2034,12 @@ function InstructorPoolPage({ theme, activeSemester, allSchedules = [] }) {
             <tr key={inst.id} style={{background:editId===inst.id?theme.light2:(i%2===0?"#fff":"#f8fafc")}}>
               <td style={{padding:"10px 16px",borderBottom:`1px solid ${theme.light2}`}}><div style={{fontWeight:600,color:"#0f172a",marginBottom:3}}>{inst.name}</div><DeptBadge deptCode={inst.department}/></td>
               <td style={{padding:"10px 12px",borderBottom:`1px solid ${theme.light2}`,textAlign:"center"}}><DeptBadge deptCode={inst.department}/></td>
-              <td style={{padding:"10px 12px",borderBottom:`1px solid ${theme.light2}`,textAlign:"center"}}><span style={{padding:"3px 12px",borderRadius:20,fontSize:11,fontWeight:700,background:isReg?"#dcfce7":"#fef9c3",color:isReg?"#166534":"#854d0e",border:`1px solid ${isReg?"#86efac":"#fde68a"}`}}>{isReg?"🏛 Regular":"⏱ Part-time"}</span></td>
+              <td style={{padding:"10px 12px",borderBottom:`1px solid ${theme.light2}`,textAlign:"center"}}>
+                <span style={{padding:"3px 12px",borderRadius:20,fontSize:11,fontWeight:700,background:empStyle.bg,color:empStyle.color,border:`1px solid ${empStyle.border}`}}>
+                  {empStyle.icon} {empStyle.label}
+                </span>
+              </td>
               <td style={{padding:"10px 12px",borderBottom:`1px solid ${theme.light2}`,color:"#64748b",fontSize:12}}>{inst.email||"—"}</td>
-              {/* ── MODIFIED: Hour Load cell with progress bar ── */}
               <td style={{padding:"10px 14px",borderBottom:`1px solid ${theme.light2}`,minWidth:190}}>
                 {maxLoad > 0 ? (
                   <div>
@@ -2135,7 +2094,6 @@ function InstructorPoolPage({ theme, activeSemester, allSchedules = [] }) {
           <span style={{fontSize:16}}>🏛</span>
           <span>New instructors will be tagged to <strong>{theme.code}</strong> by default. You can change the department below if needed.</span>
         </div>
-        {/* ── MODIFIED: added Max Load field to form grid ── */}
         <div style={{display:"grid",gridTemplateColumns:"2fr 1fr 1fr 1fr 1fr",gap:12,alignItems:"end"}}>
           <div><label style={{fontSize:12,fontWeight:600,color:"#374151",display:"block",marginBottom:5}}>Full Name</label><input style={inpStyle} placeholder="e.g. Juan Dela Cruz" value={form.name} onChange={e=>setForm(f=>({...f,name:e.target.value}))}/></div>
           <div><label style={{fontSize:12,fontWeight:600,color:"#374151",display:"block",marginBottom:5}}>Department <span style={{background:theme.primary,color:"#fff",borderRadius:4,padding:"1px 6px",fontSize:10,fontWeight:800}}>{theme.code}</span></label><input style={{...inpStyle,fontWeight:700,color:theme.primary,textTransform:"uppercase"}} placeholder={theme.code} value={form.department} onChange={e=>setForm(f=>({...f,department:e.target.value.toUpperCase()}))}/></div>
@@ -2165,9 +2123,10 @@ function InstructorPoolPage({ theme, activeSemester, allSchedules = [] }) {
           <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
             <span style={{padding:"4px 14px",borderRadius:20,fontSize:12,fontWeight:600,background:"#dcfce7",color:"#166534",border:"1px solid #86efac"}}>🏛 Regular: {regular.length}</span>
             <span style={{padding:"4px 14px",borderRadius:20,fontSize:12,fontWeight:600,background:"#fef9c3",color:"#854d0e",border:"1px solid #fde68a"}}>⏱ Part-time: {parttime.length}</span>
+            <span style={{padding:"4px 14px",borderRadius:20,fontSize:12,fontWeight:600,background:"#e0e7ff",color:"#3730a3",border:"1px solid #c7d2fe"}}>📋 Contractual: {contractual.length}</span>
             <span style={{padding:"4px 14px",borderRadius:20,fontSize:12,fontWeight:600,background:theme.light2,color:theme.text,border:`1px solid ${theme.border}`}}>Total: {instructors.length}</span>
           </div>
-          {[["🏛 Regular Instructors",regular,"No regular instructors yet."],["⏱ Part-time Instructors",parttime,"No part-time instructors yet."]].map(([label,list,emptyMsg])=>{
+          {[["🏛 Regular Instructors",regular,"No regular instructors yet."],["⏱ Part-time Instructors",parttime,"No part-time instructors yet."],["📋 Contractual Instructors",contractual,"No contractual instructors yet."]].map(([label,list,emptyMsg])=>{
             if(!list.length) return null;
             return (
               <div key={label} style={{background:"#fff",borderRadius:12,overflow:"hidden",boxShadow:`0 2px 8px rgba(0,0,0,0.06)`}}>
@@ -2505,7 +2464,6 @@ function InlineScheduleGrid({ schedules, allSchedules, academicYear, semester, o
   const real = schedules.filter(s => !s.is_break);
   const instructors = [...new Set(real.filter(s => s.instructor?.trim()).map(s => s.instructor))].sort();
 
-  // ── default every instructor to collapsed (moved AFTER `instructors` is declared) ──
   useEffect(() => {
     setCollapsed(prev => {
       const next = { ...prev };
@@ -2515,239 +2473,356 @@ function InlineScheduleGrid({ schedules, allSchedules, academicYear, semester, o
     });
   }, [instructors.join("|")]);
 
+  const formatPrintTime = (start, end) => {
+    const formatted = fmtRange(start, end).replace(/\s(?:AM|PM)\b/gi, "");
+    const isAM = start < 12;
+    return formatted + (isAM ? " AM" : " PM");
+  };
+
   const handlePrint = () => {
-  const win = window.open("", "_blank");
-  const pages = instructors
-    .map(inst => document.getElementById(`inline-faculty-print-${inst}`)?.innerHTML || "")
-    .filter(Boolean);
+    const win = window.open("", "_blank");
+    const pages = instructors
+      .map(inst => document.getElementById(`inline-faculty-print-${inst}`)?.innerHTML || "")
+      .filter(Boolean);
 
-  if (!win || !pages.length) {
-    if (win) win.close();
-    return;
-  }
+    if (!win || !pages.length) {
+      if (win) win.close();
+      return;
+    }
 
-  const pagesHtml = pages
-    .map((content, index) => `
-      <section class="print-page">
-        <div class="print-inner" id="printInner${index}">${content}</div>
-      </section>
-    `)
-    .join("");
+    const pagesHtml = pages
+      .map((content, index) => `
+        <section class="print-page">
+          <div class="print-inner" id="printInner${index}">${content}</div>
+        </section>
+      `)
+      .join("");
 
-  win.document.write(`<!DOCTYPE html>
+    win.document.write(`<!DOCTYPE html>
 <html>
   <head>
     <title>Faculty Class Schedule</title>
     <style>
-   :root {
-  --page-width: 12.5in;
-  --page-height: 8in;
-  --time-column: 2in;
-}
-
+      :root {
+        --page-width: 100%;
+        --page-height: auto;
+        --time-column-width: 18%;
+        --day-column-width: calc((100% - 18%) / 7);
+        --base-font-size: 11pt;
+      }
+      
       * { box-sizing: border-box; margin: 0; padding: 0; }
-      html, body { width: var(--page-width); min-height: var(--page-height); }
-      body { font-family: Arial, sans-serif; font-size: 10pt; color: #000; background: #fff; }
+      
+      html, body { 
+        width: 100%;
+        margin: 0;
+        padding: 0;
+        font-family: Arial, sans-serif;
+        color: #000;
+        background: #fff;
+      }
+      
+      body { 
+        font-size: var(--base-font-size);
+      }
 
       .print-page {
-        width: var(--page-width);
-        height: var(--page-height);
-        overflow: hidden;
-        position: relative;
-        break-after: page;
-        page-break-after: always;
-      }
-
-      .print-page:last-child {
-        break-after: auto;
-        page-break-after: auto;
-      }
-
-      .print-inner {
         width: 100%;
-        transform-origin: top left;
+        padding: 0.2in;
+        background: white;
+        page-break-after: always;
+        break-after: always;
+        margin-bottom: 0.2in;
       }
 
-      /* Keep the time column and seven weekday columns at fixed, stable widths. */
-      .faculty-print-table > table {
+      .print-inner { 
+        width: 100%;
+      }
+
+      .print-table {
+        width: 100%;
+        overflow-x: auto;
+        margin-bottom: 0.15in;
+      }
+
+      .print-table table {
         width: 100% !important;
         border-collapse: collapse;
         table-layout: fixed !important;
       }
 
-      .faculty-print-table > table col:first-child {
-        width: var(--time-column) !important;
+      .print-table table col:first-child { 
+        width: var(--time-column-width) !important; 
       }
 
-      .faculty-print-table > table col:not(:first-child) {
-        width: calc((100% - var(--time-column)) / 7) !important;
+      .print-table table col:not(:first-child) { 
+        width: var(--day-column-width) !important; 
       }
 
-      .faculty-print-table > table th:first-child,
-      .faculty-print-table > table td:first-child {
-        width: var(--time-column) !important;
-        min-width: var(--time-column) !important;
-        max-width: var(--time-column) !important;
-        white-space: nowrap !important;
+      .print-table table th:first-child,
+      .print-table table td:first-child {
+        width: var(--time-column-width) !important;
+        min-width: var(--time-column-width) !important;
+        max-width: var(--time-column-width) !important;
       }
 
-      .faculty-print-table > table tr,
-      .faculty-print-table > table td,
-      .faculty-print-table > table th {
+      .print-table table thead { 
+        display: table-header-group; 
+      }
+
+      .print-table table tr,
+      .print-table table td,
+      .print-table table th {
         break-inside: avoid;
         page-break-inside: avoid;
       }
 
-      .faculty-print-table > table thead { display: table-header-group; }
+      .print-header { 
+        width: 100%;
+        margin-bottom: 0.15in;
+      }
 
-
-/* Shrink the logo row — it was still rendering at full inline size
-         (82px logos, 24px title) and eating most of the fixed page height,
-         starving the grid below and forcing it to scale down too far. */
-      .faculty-print-header > div:first-child {
+      .print-header > div:first-child { 
         padding-bottom: 6px !important;
         margin-bottom: 6px !important;
+        border-bottom: 3px double #000;
       }
-      .faculty-print-header > div:first-child > div {
-        gap: 10px !important;
+
+      .print-header > div:first-child > div { 
+        gap: 12px !important;
       }
-      .faculty-print-header > div:first-child img {
-        width: 50px !important;
-        height: 50px !important;
+
+      .print-header > div:first-child img { 
+        width: 45px !important;
+        height: 45px !important;
       }
-      .faculty-print-header > div:first-child > div > div:nth-child(2) > div:nth-child(1) {
-        font-size: 16px !important;
+
+      .print-header > div:first-child > div > div:nth-child(2) > div:nth-child(1) { 
+        font-size: 13pt !important;
+        font-weight: 900;
       }
-      .faculty-print-header > div:first-child > div > div:nth-child(2) > div:nth-child(2) {
-        font-size: 13px !important;
+
+      .print-header > div:first-child > div > div:nth-child(2) > div:nth-child(2) { 
+        font-size: 10pt !important;
         margin-top: 1px !important;
       }
-      .faculty-print-header > div:first-child > div > div:nth-child(2) > div:nth-child(3) {
-        font-size: 12px !important;
+
+      .print-header > div:first-child > div > div:nth-child(2) > div:nth-child(3) { 
+        font-size: 9pt !important;
         margin-top: 1px !important;
       }
 
-      /* Make the printable faculty header comfortably readable on long paper. */
-      .faculty-print-header > div:nth-child(2) {
-        font-size: 16px !important;
-        margin: 10px 0 7px !important;
+      .print-header > div:nth-child(2) { 
+        font-size: 16pt !important;
+        font-weight: bold;
+        margin: 6px 0 3px !important;
+        text-align: center;
       }
 
-
-
-
-
-
-      /* Make the printable faculty header comfortably readable on long paper. */
-      .faculty-print-header > div:nth-child(2) {
-        font-size: 13px !important;
-        margin: 10px 0 7px !important;
+      .print-header > div:nth-child(3) { 
+        font-size: 10pt !important;
+        margin-bottom: 4px !important;
+        text-align: center;
       }
 
-      .faculty-print-header > div:nth-child(3) {
-        font-size: 12px !important;
-        margin-bottom: 10px !important;
+      .print-header > div:last-child { 
+        font-size: 9pt !important;
+        padding: 6px 10px !important;
+        margin-bottom: 6px !important;
+        gap: 15px !important;
       }
 
-      .faculty-print-header > div:last-child {
-        font-size: 12px !important;
-        padding: 12px 20px !important;
-        margin-bottom: 12px !important;
-        gap: 28px !important;
+      .print-table table thead th {
+        padding: 5px 3px !important;
+        font-size: 8.5pt !important;
+        font-weight: bold;
+        white-space: normal !important;
+        word-break: break-word;
       }
 
-      @page { size: 13in 8.5in; margin: 0.25in; }
+      .print-table table thead th:first-child {
+        font-size: 8pt !important;
+      }
+
+      .print-table table tbody td:first-child {
+        font-size: 7.5pt !important;
+        font-weight: bold;
+        padding: 2px 3px !important;
+        white-space: normal !important;
+        word-break: break-word;
+      }
+
+      .print-table table tbody td:not(:first-child) {
+        font-size: 7.5pt !important;
+        padding: 3px !important;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+
+      .subject-badge {
+        display: inline-block;
+        padding: 1px 5px !important;
+        border-radius: 2px;
+        font-size: 7.5pt !important;
+        font-weight: bold;
+        margin-bottom: 1px !important;
+      }
+
+      .subject-code {
+        font-size: 7.5pt !important;
+        font-weight: bold;
+        line-height: 1.1;
+      }
+
+      .subject-section {
+        font-size: 7pt !important;
+        line-height: 1.1;
+        margin-top: 0;
+      }
+
+      .subject-room {
+        font-size: 7pt !important;
+        line-height: 1.1;
+        margin-top: 0;
+      }
+
+      .subject-type {
+        font-size: 7pt !important;
+        font-weight: bold;
+        margin-top: 0;
+      }
+
+      .lunch-cell {
+        font-size: 9pt !important;
+        font-weight: bold;
+        padding: 3px !important;
+      }
+
+      .break-cell {
+        font-size: 8pt !important;
+        font-weight: bold;
+        padding: 2px !important;
+      }
+
+  /* COMPACT SIGNATURE BLOCK */
+.signature-block {
+  width: 100%;
+  margin-top: 0.5in;        /* ⬅️ CHANGE THIS: from 0.1in to 0.6in */
+  padding: 0;
+  margin-bottom: 0.1in;
+}
+
+.signature-row {
+  display: flex;
+  justify-content: space-between;
+  margin-bottom: 0.03in;
+  gap: 40px;
+}
+
+.signature-item {
+  flex: 1;
+  text-align: center;
+}
+
+.signature-line {
+  border-bottom: 1px solid #000;
+  width: 40%;
+  height: 0;
+  margin: 0 auto 0.01in auto;
+}
+
+.signature-label {
+  font-size: 7pt !important;
+  color: #666;
+  margin-bottom: 0.01in;
+  display: none;
+}
+
+.signature-name {
+  font-size: 7.5pt !important;
+  font-weight: bold;
+  margin-top: 0;
+  line-height: 1;
+}
+
+.signature-title {
+  font-size: 6.5pt !important;
+  color: #555;
+  margin-top: 0;
+  line-height: 1;
+}
+
+      @page { 
+        size: A4 landscape;
+        margin: 0.2in;
+      }
 
       @media print {
-        html, body { width: var(--page-width); min-height: var(--page-height); }
-        body { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
-        .print-page {
-          width: var(--page-width);
-          height: var(--page-height);
-          overflow: hidden;
-          break-after: page;
-          page-break-after: always;
+        html, body { 
+          width: 100%;
+          margin: 0;
+          padding: 0;
         }
-        .print-page:last-child {
-          break-after: auto;
-          page-break-after: auto;
+        
+        .print-page { 
+          width: 100%;
+          padding: 0.15in;
+          page-break-after: always;
+          break-after: always;
+        }
+
+        body { 
+          -webkit-print-color-adjust: exact; 
+          print-color-adjust: exact; 
         }
       }
     </style>
   </head>
-  <body>${pagesHtml}
+  <body>
+    ${pagesHtml}
     <script>
       (function () {
         var printed = false;
 
-       function fitWholePage() {
-  var pages = document.querySelectorAll(".print-page");
-
-  pages.forEach(function (outer) {
-    var inner = outer.querySelector(".print-inner");
-    if (!inner) return;
-
-    var header = inner.querySelector(".faculty-print-header");
-    var tableWrap = inner.querySelector(".faculty-print-table");
-    if (!header || !tableWrap) return;
-
-    // Reset before measuring so header keeps its natural, fixed size always.
-    tableWrap.style.width = "100%";
-    tableWrap.style.transform = "none";
-
-    // Only the table area scales — it gets whatever height is left
-    // after the header, which is never touched.
-    var availableHeight = outer.clientHeight - header.offsetHeight;
-    var widthScale  = outer.clientWidth / tableWrap.scrollWidth;
-    var heightScale = availableHeight / tableWrap.scrollHeight;
-    var scale = Math.min(1, widthScale, heightScale);
-
-    if (scale > 0 && isFinite(scale) && scale < 1) {
-      tableWrap.style.width = (100 / scale) + "%";
-      tableWrap.style.transform = "scale(" + scale + ")";
-      tableWrap.style.transformOrigin = "top left";
-    }
-  });
-}
-
         function printOnce() {
           if (printed) return;
           printed = true;
-          fitWholePage();
-          setTimeout(function () { window.print(); window.close(); }, 150);
+          
+          var images = Array.prototype.slice.call(document.images);
+          var pending = images.filter(function (image) { return !image.complete; }).length;
+
+          if (!pending) {
+            doPrint();
+          } else {
+            var finished = 0;
+            function imageDone() { 
+              finished += 1; 
+              if (finished >= pending) doPrint(); 
+            }
+            images.forEach(function (image) {
+              image.addEventListener("load", imageDone, { once: true });
+              image.addEventListener("error", imageDone, { once: true });
+            });
+            setTimeout(doPrint, 2000);
+          }
         }
 
-        var images = Array.prototype.slice.call(document.images);
-        var pending = images.filter(function (image) { return !image.complete; }).length;
-
-        if (!pending) {
-          requestAnimationFrame(printOnce);
-          return;
+        function doPrint() {
+          setTimeout(function () { 
+            window.print(); 
+            window.close(); 
+          }, 100);
         }
 
-        var finished = 0;
-        function imageDone() {
-          finished += 1;
-          if (finished >= pending) printOnce();
-        }
-
-        images.forEach(function (image) {
-          image.addEventListener("load", imageDone, { once: true });
-          image.addEventListener("error", imageDone, { once: true });
-        });
-
-        // Do not let a broken or remote logo prevent printing.
-        setTimeout(printOnce, 2000);
+        requestAnimationFrame(printOnce);
       }());
-    </scr${"ipt"}>
-    </scr${"ipt"}>
+    </script>
   </body>
 </html>`);
 
-  win.document.close();
-  win.focus();
-};
-
+    win.document.close();
+    win.focus();
+  };
 
   const handleDragStart = (e, block) => {
     setDragBlock(block);
@@ -2787,10 +2862,6 @@ function InlineScheduleGrid({ schedules, allSchedules, academicYear, semester, o
     e.dataTransfer.dropEffect = "move";
     setDragOver({ day, time });
   };
-
-  // Printable rows use the AM/PM section headings, so keep each time range compact.
-  const formatPrintTime = (start, end) =>
-    fmtRange(start, end).replace(/\s(?:AM|PM)\b/gi, "");
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 0 }}>
@@ -2840,162 +2911,130 @@ function InlineScheduleGrid({ schedules, allSchedules, academicYear, semester, o
         </div>
       </div>
 
-      {/* Printable content */}
-      <div id="inline-faculty-print-area" style={{ fontFamily: "Arial, sans-serif", fontSize: 10, color: "#000", background: "#fff" }}>
-        <SchoolHeader academicYear={academicYear} semester={semester} theme={theme} compact />
-
-        <div style={{ textAlign: "center", fontSize: 14, fontWeight: "bold", textTransform: "uppercase", letterSpacing: 1.5, margin: "10px 0 16px" }}>
-          Faculty Class Schedule
+      {instructors.length === 0 && (
+        <div style={{ textAlign: "center", padding: "48px 0", color: "#94a3b8", fontSize: 14 }}>
+          No instructor schedules yet. Add schedules in <strong>Instructor Load</strong>.
         </div>
+      )}
 
-        {instructors.length === 0 && (
-          <div style={{ textAlign: "center", padding: "48px 0", color: "#94a3b8", fontSize: 14 }}>
-            No instructor schedules yet. Add schedules in <strong>Instructor Load</strong>.
-          </div>
-        )}
+      {instructors.map(inst => {
+        const rawCls = schedules
+          .filter(s => normName(s.instructor) === normName(inst) && !s.is_break)
+          .map(b => ({ ...b, start: Number(b.start), end: Number(b.end) }));
+        const cls = DAYS.flatMap(day => {
+          const dayBlocks = rawCls.filter(b => b.day === day);
+          return dayBlocks.length ? insertBreaks(dayBlocks) : [];
+        });
+        const realCls = cls.filter(s => !s.is_break);
+        const total   = realCls.reduce((s, c) => s + (c.end - c.start), 0);
+        const labH    = realCls.filter(c => c.roomType === "Laboratory").reduce((s, c) => s + (c.end - c.start), 0);
+        const lecH    = realCls.filter(c => c.roomType === "Lecture").reduce((s, c) => s + (c.end - c.start), 0);
+        const instSlots = buildPrintTimeSlots(cls);
 
-        {instructors.map(inst => {
-          const rawCls = schedules
-            .filter(s => normName(s.instructor) === normName(inst) && !s.is_break)
-            .map(b => ({ ...b, start: Number(b.start), end: Number(b.end) }));
-          const cls = DAYS.flatMap(day => {
-            const dayBlocks = rawCls.filter(b => b.day === day);
-            return dayBlocks.length ? insertBreaks(dayBlocks) : [];
-          });
-          const realCls = cls.filter(s => !s.is_break);
-          const total   = realCls.reduce((s, c) => s + (c.end - c.start), 0);
-          const labH    = realCls.filter(c => c.roomType === "Laboratory").reduce((s, c) => s + (c.end - c.start), 0);
-          const lecH    = realCls.filter(c => c.roomType === "Lecture").reduce((s, c) => s + (c.end - c.start), 0);
-          const instSlots = buildPrintTimeSlots(cls);
+        return (
+          <div key={inst} style={{ marginBottom: 28, border: `1px solid ${theme.border}`, borderRadius: 10, overflow: "hidden" }}>
+            {/* Instructor header */}
+            <div
+              style={{ background: theme.primary, color: "#fff", padding: "9px 16px", display: "flex", alignItems: "center", gap: 14, flexWrap: "wrap", cursor: "pointer", userSelect: "none" }}
+              onClick={() => setCollapsed(prev => ({ ...prev, [inst]: !prev[inst] }))}
+            >
+              <span style={{ fontWeight: 700, fontSize: 14 }}>👨‍🏫 {inst}</span>
+              <span style={{ fontSize: 11, opacity: 0.8 }}>⏱ {total} hrs total</span>
+              <span style={{ fontSize: 11, opacity: 0.8 }}>📖 Lecture: {lecH}h</span>
+              <span style={{ fontSize: 11, opacity: 0.8 }}>🔬 Lab: {labH}h</span>
+              <span style={{ marginLeft: "auto", fontSize: 12, opacity: 0.85 }}>{collapsed[inst] ? "▶ Show" : "▼ Hide"}</span>
+            </div>
 
-          return (
-            <div key={inst} style={{ marginBottom: 28, border: `1px solid ${theme.border}`, borderRadius: 10, overflow: "hidden" }}>
-              {/* Instructor header */}
-              <div
-                style={{ background: theme.primary, color: "#fff", padding: "9px 16px", display: "flex", alignItems: "center", gap: 14, flexWrap: "wrap", cursor: "pointer", userSelect: "none" }}
-                onClick={() => setCollapsed(prev => ({ ...prev, [inst]: !prev[inst] }))}
-              >
-                <span style={{ fontWeight: 700, fontSize: 14 }}>👨‍🏫 {inst}</span>
-                <span style={{ fontSize: 11, opacity: 0.8 }}>⏱ {total} hrs total</span>
-                <span style={{ fontSize: 11, opacity: 0.8 }}>📖 Lecture: {lecH}h</span>
-                <span style={{ fontSize: 11, opacity: 0.8 }}>🔬 Lab: {labH}h</span>
-                <span style={{ marginLeft: "auto", fontSize: 12, opacity: 0.85 }}>{collapsed[inst] ? "▶ Show" : "▼ Hide"}</span>
-              </div>
-
-              {/* Hidden printable schedule — faculty header dimensions are retained. */}
-              <div id={`inline-faculty-print-${inst}`} style={{ display: "none" }}>
-                <div className="faculty-print-header">
-                <div style={{ display: "flex", justifyContent: "center", paddingBottom: 14, marginBottom: 14, borderBottom: "3px double #000" }}>
-                  <div style={{ display: "flex", alignItems: "center", gap: 24, maxWidth: 900 }}>
-                    <DeptLogo code={theme.code} style={{ width: 72, height: 72, objectFit: "contain", flexShrink: 0 }} alt={theme.code}/>
+            {/* Hidden printable schedule */}
+            <div id={`inline-faculty-print-${inst}`} style={{ display: "none" }}>
+              <div className="print-header">
+                <div style={{ display: "flex", justifyContent: "center" }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 20, maxWidth: 900 }}>
+                    <DeptLogo code={theme.code} style={{ width: 60, height: 60, objectFit: "contain", flexShrink: 0 }} alt={theme.code}/>
                     <div style={{ textAlign: "center" }}>
-                      <div style={{ fontSize: 21, fontWeight: 900, textTransform: "uppercase" }}>Passi City College</div>
-                      <div style={{ fontSize: 18, fontWeight: 700, color: theme.primary, marginTop: 4 }}>{theme.shortName}</div>
-                      <div style={{ fontSize: 17, color: "#555", marginTop: 3 }}>Barangay Bacuranan, Passi City, Iloilo</div>
+                      <div style={{ fontSize: 13, fontWeight: 900, textTransform: "uppercase" }}>Passi City College</div>
+                      <div style={{ fontSize: 10, fontWeight: 700, color: theme.primary, marginTop: 1 }}>{theme.shortName}</div>
+                      <div style={{ fontSize: 9, color: "#555", marginTop: 1 }}>Barangay Bacuranan, Passi City, Iloilo</div>
                     </div>
-                    <img src={PCCLogo} style={{ width: 72, height: 72, objectFit: "contain", flexShrink: 0 }} alt="PCC"/>
+                    <img src={PCCLogo} style={{ width: 60, height: 60, objectFit: "contain", flexShrink: 0 }} alt="PCC"/>
                   </div>
                 </div>
-                <div style={{ textAlign: "center", fontWeight: "bold", fontSize: 35, textTransform: "uppercase", margin: "8px 0 6px" }}>Faculty Class Schedule — {inst}</div>
-                {academicYear && semester && <div style={{ textAlign: "center", fontSize: 15, color: theme.primary, marginBottom: 8 }}>A.Y. {academicYear} · {semester}</div>}
-                <div style={{ background: theme.primary, color: theme.light, fontSize: 18, padding: "12px 20px", marginBottom: 12, display: "flex", gap: 28, flexWrap: "wrap", borderRadius: 4 }}>
+                <div style={{ textTransform: "uppercase" }}>Faculty Class Schedule — {inst}</div>
+                {academicYear && semester && <div style={{ color: theme.primary }}>A.Y. {academicYear} · {semester}</div>}
+                <div style={{ background: theme.primary, color: theme.light, padding: "5px 8px", display: "flex", gap: 12, flexWrap: "wrap", borderRadius: 4 }}>
                   <span>⏱ Total: <strong style={{ color: "#fff" }}>{total} hrs</strong></span>
                   <span>📖 Lecture: <strong style={{ color: "#fff" }}>{lecH} hrs</strong></span>
                   <span>🔬 Lab: <strong style={{ color: "#fff" }}>{labH} hrs</strong></span>
                 </div>
-                </div>
+              </div>
 
-              {/* Printable table — kept in the same schedule page as the header. */}
-              <div className="faculty-print-table">
-                <table style={{ width: "100%", borderCollapse: "collapse", tableLayout: "fixed", fontSize: 22 }}>
+              <div className="print-table">
+                <table style={{ width: "100%" }}>
                   <colgroup>
-                    <col style={{ width: "250px" }} />
-                    {DAYS.map(d => <col key={d} style={{ width: "calc((100% - 250px) / 7)" }} />)}
+                    <col style={{ width: "18%" }} />
+                    {DAYS.map(d => <col key={d} style={{ width: "calc((100% - 18%) / 7)" }} />)}
                   </colgroup>
-                  <thead><tr>
-                    <th style={{ background: theme.primary3 || theme.primary, color: "#fff", border: `1px solid ${theme.primary}`, padding: "10px 8px", fontSize: 20, whiteSpace: "nowrap" }}>TIME : AM</th>
-                    {DAYS.map(d => <th key={d} style={{ background: theme.primary, color: "#fff", border: `1px solid ${theme.primary3 || theme.primary}`, padding: "10px 8px", fontSize: 20 }}>{d}</th>)}
-                  </tr></thead>
+                  <thead>
+                    <tr>
+                      <th style={{ background: theme.primary3 || theme.primary, color: "#fff", border: `1px solid ${theme.primary}` }}>TIME</th>
+                      {DAYS.map(d => <th key={d} style={{ background: theme.primary, color: "#fff", border: `1px solid ${theme.primary3 || theme.primary}` }}>{d}</th>)}
+                    </tr>
+                  </thead>
                   <tbody>
                     {instSlots.map(t => {
-                      if (t === LUNCH_START) return [
+                      if (t === LUNCH_START) return (
                         <tr key="lunch">
-  <td style={{ ...printCellBox(1), background: "#fef9c3", border: "1px solid #ddd", padding: "8px 8px", fontWeight: 700, fontSize: 20, textAlign: "center", verticalAlign: "middle", color: "#854d0e", whiteSpace: "nowrap" }}>{formatPrintTime(LUNCH_START, LUNCH_END)}</td>
-  {DAYS.map(day => <td key={day} style={{ ...printCellBox(1), border: "1px solid #ddd", textAlign: "center", verticalAlign: "middle", padding: "8px 8px", background: "#fef9c3" }}><span style={{ fontSize: 20, color: "#854d0e", fontWeight: 700 }}>🍽 Lunch</span></td>)}
-</tr>,
-                        <tr key="pm-time-heading">
-                          <th scope="row" style={{ ...printCellBox(1), background: theme.primary3 || theme.primary, color: "#fff", border: `1px solid ${theme.primary}`, padding: "4px 8px", fontWeight: 700, fontSize: 20, textAlign: "center", verticalAlign: "middle", whiteSpace: "nowrap" }}>TIME : PM</th>
-                          {DAYS.map(day => <td key={day} style={{ ...printCellBox(1), background: "#fff", border: "1px solid #ddd", padding: "4px 8px" }} />)}
-                        </tr>,
-                      ];
+                          <td style={{ background: "#fef9c3", border: "1px solid #ddd" }} className="lunch-cell"></td>
+                          {DAYS.map(day => <td key={day} style={{ border: "1px solid #ddd", background: "#fef9c3", textAlign: "center" }} className="lunch-cell">🍽 Lunch</td>)}
+                        </tr>
+                      );
                       if (t > LUNCH_START && t < LUNCH_END) return null;
+                      
                       const nextT = instSlots[instSlots.indexOf(t) + 1] ?? (t + 1);
                       return (
                         <tr key={t}>
-                        <td style={{ ...printCellBox(1), background: theme.light, border: "1px solid #ddd", padding: "10px 8px", fontWeight: 700, fontSize: 18, textAlign: "center", verticalAlign: "middle", color: theme.primary, whiteSpace: "nowrap" }}>{formatPrintTime(t, nextT)}</td>
+                          <td style={{ background: theme.light, border: "1px solid #ddd", textAlign: "center", color: theme.primary, fontWeight: 700 }}>
+                            {formatPrintTime(t, nextT)}
+                          </td>
                           {DAYS.map(day => {
                             const info = getCellSpanInfo(cls, day, t, instSlots);
                             if (info.kind === "covered") return null;
 
-                            const isDragTarget = dragOver?.day === day && dragOver?.time === t;
-
                             if (info.kind === "empty") return (
-                             <td
-  key={day}
-  style={{ ...printCellBox(1), border: `2px solid ${isDragTarget ? theme.primary : "#ddd"}`, padding: "10px 8px", verticalAlign: "middle", background: isDragTarget ? theme.light2 : "#fff", transition: "all 0.12s", cursor: dragBlock ? "copy" : "default" }}
-  onDragOver={e => handleDragOver(e, day, t)}
-  onDragLeave={() => setDragOver(null)}
-  onDrop={e => handleDrop(e, day, t, inst)}
->
-                                {isDragTarget && (<div style={{ fontSize: 11, color: theme.primary, fontWeight: 700, textAlign: "center", padding: 4 }}>Drop here</div>)}
-                              </td>
+                              <td key={day} style={{ border: "1px solid #ddd", background: "#fff" }} />
                             );
 
                             const m = info.block;
                             const rowSpan = info.span;
 
                             if (m.is_break) return (
-                             <td key={day} rowSpan={rowSpan} style={{ ...printCellBox(rowSpan), border: "1px solid #ddd", textAlign: "center", verticalAlign: "middle", padding: "8px 8px", background: "#fef9c3" }}>
-  <span style={{ fontSize: 14, color: "#854d0e", fontWeight: 700 }}>☕ Break</span>
-</td>
+                              <td key={day} rowSpan={rowSpan} style={{ border: "1px solid #ddd", textAlign: "center", background: "#fef9c3" }} className="break-cell">
+                                ☕ Break
+                              </td>
                             );
 
-                            const isDragging = dragBlock && m.id === dragBlock.id;
                             const lb = m.roomType === "Laboratory";
                             const { code, name, type } = resolveSubjectDisplay(m, codeMap);
                             const sc = getSubjectColor(m.subject, type, m.roomType);
 
                             return (
-                             <td
-  key={day}
-  rowSpan={rowSpan}
-  style={{
-    ...printCellBox(rowSpan),
-    border: `1px solid #ddd`,
-    borderLeft: `5px solid ${sc.cellBorder}`,
-    textAlign: "center",
-    verticalAlign: "middle",
-    padding: "14px 10px",
-    background: isDragging ? "rgba(0,0,0,0.04)" : sc.cellBg,
-    opacity: isDragging ? 0.45 : 1,
-    cursor: m.id ? "grab" : "default",
-    transition: "all 0.12s",
-    outline: isDragging ? `2px dashed ${theme.primary}` : "none",
-  }}
-  
-                                draggable={!!m.id}
-                                onDragStart={e => m.id && handleDragStart(e, m)}
-                                onDragOver={e => handleDragOver(e, day, t)}
-                                onDragLeave={() => setDragOver(null)}
-                                onDrop={e => handleDrop(e, day, t, inst)}
-                                onDoubleClick={() => m.id && setEditingBlock(m)}
+                              <td
+                                key={day}
+                                rowSpan={rowSpan}
+                                style={{
+                                  border: `1px solid #ddd`,
+                                  borderLeft: `3px solid ${sc.cellBorder}`,
+                                  textAlign: "center",
+                                  verticalAlign: "middle",
+                                  background: sc.cellBg,
+                                }}
                               >
-              <div style={{ display: "inline-flex", alignItems: "center", background: sc.badgeBg, color: "#fff", borderRadius: 5, padding: "9px 18px", fontSize: 19, fontWeight: 900, letterSpacing: 0.8, textTransform: "uppercase", marginBottom: 6 }}>
-  {code || name}
-</div>{m.section && <div style={{ fontSize: 18, lineHeight: 1.3, color: sc.accentColor, fontWeight: 700 }}>{m.section}</div>}
-<div style={{ fontSize: 18, lineHeight: 1.3, color: "#475569" }}>{m.room}</div>
-<div style={{ fontSize: 18, lineHeight: 1.3, color: sc.accentColor, fontWeight: 700 }}>{lb ? "🔬 Lab" : "📖 Lec"}</div>
-              {m.id && (<div style={{ fontSize: 11, color: "#94a3b8", marginTop: 5 }}>✥ drag</div>)}
+                                <div className="subject-badge" style={{ background: sc.badgeBg, color: "#fff" }}>
+                                  {code || name}
+                                </div>
+                                {m.section && <div className="subject-section" style={{ color: sc.accentColor }}>{m.section}</div>}
+                                <div className="subject-room" style={{ color: "#475569" }}>{m.room}</div>
+                                <div className="subject-type" style={{ color: sc.accentColor }}>{lb ? "🔬 Lab" : "📖 Lec"}</div>
                               </td>
                             );
                           })}
@@ -3004,129 +3043,143 @@ function InlineScheduleGrid({ schedules, allSchedules, academicYear, semester, o
                     })}
                   </tbody>
                 </table>
-                <SignatureBlock/>
-              </div>
               </div>
 
-              {!collapsed[inst] && (
-                <div style={{ overflowX: "auto" }}>
-                  <table style={{ width: "100%", borderCollapse: "collapse", tableLayout: "fixed", fontSize: 15 }}>
-                    <colgroup>
-                      <col style={{ width: "160px" }} />
-                      {DAYS.map(d => <col key={d} style={{ width: "calc((100% - 160px) / 7)" }} />)}
-                    </colgroup>
-                    <thead>
-                      <tr>
-                        <th style={{ background: theme.primary, color: "#fff", padding: "14px 16px", border: `1px solid ${theme.primary3 || theme.primary}`, textAlign: "center", fontSize: 14 }}>Time</th>
-                        {DAYS.map(d => (
-                          <th key={d} style={{ background: theme.primary, color: "#fff", padding: "14px 12px", border: `1px solid ${theme.primary3 || theme.primary}`, textAlign: "center", fontSize: 14 }}>{d}</th>
-                        ))}
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {instSlots.map(t => {
-                        const nextT = instSlots[instSlots.indexOf(t) + 1] ?? (t + 1);
-                        if (t === LUNCH_START) return (
-                          <tr key="lunch">
-                            <td style={{ ...printCellBox(1), background: theme.light, border: "1px solid #ddd", padding: "4px 8px", fontWeight: 700, fontSize: 13, textAlign: "center", verticalAlign: "middle", color: theme.primary, whiteSpace: "nowrap" }}>
-  {fmtRange(t, nextT)}
-</td>
-                            {DAYS.map(day => <td key={day} style={{ border: "1px solid #ddd", textAlign: "center", verticalAlign: "middle", padding: "10px 12px", background: "#fef9c3" }}><span style={{ fontSize: 12, color: "#854d0e", fontWeight: 700 }}>🍽 Lunch</span></td>)}
-                          </tr>
-                        );
-                        if (t > LUNCH_START && t < LUNCH_END) return null;
-                        return (
-                          <tr key={t}>
-                            <td style={{ background: theme.light, border: "1px solid #ddd", padding: "10px 12px", fontWeight: 700, fontSize: 13, textAlign: "center", verticalAlign: "middle", color: theme.primary, whiteSpace: "nowrap" }}>{fmtRange(t, nextT)}</td>
-                            {DAYS.map(day => {
-                              const info = getCellSpanInfo(cls, day, t, instSlots);
-                              if (info.kind === "covered") return null;
-
-                              const isDragTarget = dragOver?.day === day && dragOver?.time === t;
-
-                              if (info.kind === "empty") return (
-                                <td
-                                  key={day}
-                                  style={{
-                                    border: `2px solid ${isDragTarget ? theme.primary : "#ddd"}`,
-                                    padding: "10px 12px",
-                                    verticalAlign: "middle",
-                                    background: isDragTarget ? theme.light2 : "#fff",
-                                    transition: "all 0.12s",
-                                    cursor: dragBlock ? "copy" : "default",
-                                  }}
-                                  onDragOver={e => handleDragOver(e, day, t)}
-                                  onDragLeave={() => setDragOver(null)}
-                                  onDrop={e => handleDrop(e, day, t, inst)}
-                                >
-                                  {isDragTarget && (
-                                    <div style={{ fontSize: 11, color: theme.primary, fontWeight: 700, textAlign: "center", padding: 4 }}>
-                                      Drop here
-                                    </div>
-                                  )}
-                                </td>
-                              );
-
-                              const m = info.block;
-                              const rowSpan = info.span;
-
-                              if (m.is_break) return (
-                                <td key={day} rowSpan={rowSpan} style={{ border: "1px solid #ddd", textAlign: "center", verticalAlign: "middle", padding: "10px 12px", background: "#fef9c3" }}>
-                                  <span style={{ fontSize: 14, color: "#854d0e", fontWeight: 700 }}>☕ Break</span>
-                                </td>
-                              );
-
-                              const isDragging = dragBlock && m.id === dragBlock.id;
-                              const lb = m.roomType === "Laboratory";
-                              const { code, name, type } = resolveSubjectDisplay(m, codeMap);
-                              const sc = getSubjectColor(m.subject, type, m.roomType);
-
-                              return (
-                                <td
-                                  key={day}
-                                  rowSpan={rowSpan}
-                                  style={{
-                                    border: `1px solid #ddd`,
-                                    borderLeft: `4px solid ${sc.cellBorder}`,
-                                    textAlign: "center",
-                                    verticalAlign: "middle",
-                                    padding: "10px 12px",
-                                    background: isDragging ? "rgba(0,0,0,0.04)" : sc.cellBg,
-                                    opacity: isDragging ? 0.45 : 1,
-                                    cursor: m.id ? "grab" : "default",
-                                    transition: "all 0.12s",
-                                    outline: isDragging ? `2px dashed ${theme.primary}` : "none",
-                                  }}
-                                  draggable={!!m.id}
-                                  onDragStart={e => m.id && handleDragStart(e, m)}
-                                  onDragOver={e => handleDragOver(e, day, t)}
-                                  onDragLeave={() => setDragOver(null)}
-                                  onDrop={e => handleDrop(e, day, t, inst)}
-                                  onDoubleClick={() => m.id && setEditingBlock(m)}
-                                >
-                                  <div style={{ display: "inline-flex", alignItems: "center", background: sc.badgeBg, color: "#fff", borderRadius: 4, padding: "4px 12px", fontSize: 13, fontWeight: 900, letterSpacing: 0.8, textTransform: "uppercase", marginBottom: 3 }}>
-                                    {code || name}
-                                  </div>
-                                  {m.section && <div style={{ fontSize: 11.5, color: sc.accentColor, fontWeight: 700 }}>{m.section}</div>}
-                                  <div style={{ fontSize: 11.5, color: "#475569" }}>{m.room}</div>
-                                  <div style={{ fontSize: 11.5, color: sc.accentColor, fontWeight: 700 }}>{lb ? "🔬 Lab" : "📖 Lec"}</div>
-                                  {m.id && (
-                                    <div style={{ fontSize: 10, color: "#94a3b8", marginTop: 3 }}>✥ drag</div>
-                                  )}
-                                </td>
-                              );
-                            })}
-                          </tr>
-                        );
-                      })}
-                    </tbody>
-                  </table>
+              {/* COMPACT SIGNATURE BLOCK */}
+              <div className="signature-block">
+                <div className="signature-row">
+                  <div className="signature-item">
+                    <div className="signature-line"></div>
+                    <div className="signature-name">MYLEN B. PADERES</div>
+                    <div className="signature-title">Dean SOICT</div>
+                  </div>
+                  <div className="signature-item">
+                    <div className="signature-line"></div>
+                    <div className="signature-name">HEIDI A. PAMA</div>
+                    <div className="signature-title">Academic Coordinator</div>
+                  </div>
                 </div>
-              )}
+              </div>
             </div>
-          );
-        })}
-      </div>
+
+            {!collapsed[inst] && (
+              <div style={{ overflowX: "auto" }}>
+                <table style={{ width: "100%", borderCollapse: "collapse", tableLayout: "fixed", fontSize: 12 }}>
+                  <colgroup>
+                    <col style={{ width: "160px" }} />
+                    {DAYS.map(d => <col key={d} style={{ width: "calc((100% - 160px) / 7)" }} />)}
+                  </colgroup>
+                  <thead>
+                    <tr>
+                      <th style={{ background: theme.primary, color: "#fff", padding: "14px 16px", border: `1px solid ${theme.primary3 || theme.primary}`, textAlign: "center", fontSize: 14 }}>Time</th>
+                      {DAYS.map(d => (
+                        <th key={d} style={{ background: theme.primary, color: "#fff", padding: "14px 12px", border: `1px solid ${theme.primary3 || theme.primary}`, textAlign: "center", fontSize: 14 }}>{d}</th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {instSlots.map(t => {
+                      const nextT = instSlots[instSlots.indexOf(t) + 1] ?? (t + 1);
+                      if (t === LUNCH_START) return (
+                        <tr key="lunch">
+                          <td style={{ background: theme.light, border: "1px solid #ddd", padding: "4px 8px", fontWeight: 700, fontSize: 13, textAlign: "center", verticalAlign: "middle", color: theme.primary, whiteSpace: "nowrap" }}>
+                            {fmtRange(t, nextT)}
+                          </td>
+                          {DAYS.map(day => <td key={day} style={{ border: "1px solid #ddd", textAlign: "center", verticalAlign: "middle", padding: "10px 12px", background: "#fef9c3" }}><span style={{ fontSize: 12, color: "#854d0e", fontWeight: 700 }}>🍽 Lunch</span></td>)}
+                        </tr>
+                      );
+                      if (t > LUNCH_START && t < LUNCH_END) return null;
+                      return (
+                        <tr key={t}>
+                          <td style={{ background: theme.light, border: "1px solid #ddd", padding: "10px 12px", fontWeight: 700, fontSize: 13, textAlign: "center", verticalAlign: "middle", color: theme.primary, whiteSpace: "nowrap" }}>{fmtRange(t, nextT)}</td>
+                          {DAYS.map(day => {
+                            const info = getCellSpanInfo(cls, day, t, instSlots);
+                            if (info.kind === "covered") return null;
+
+                            const isDragTarget = dragOver?.day === day && dragOver?.time === t;
+
+                            if (info.kind === "empty") return (
+                              <td
+                                key={day}
+                                style={{
+                                  border: `2px solid ${isDragTarget ? theme.primary : "#ddd"}`,
+                                  padding: "10px 12px",
+                                  verticalAlign: "middle",
+                                  background: isDragTarget ? theme.light2 : "#fff",
+                                  transition: "all 0.12s",
+                                  cursor: dragBlock ? "copy" : "default",
+                                }}
+                                onDragOver={e => handleDragOver(e, day, t)}
+                                onDragLeave={() => setDragOver(null)}
+                                onDrop={e => handleDrop(e, day, t, inst)}
+                              >
+                                {isDragTarget && (
+                                  <div style={{ fontSize: 11, color: theme.primary, fontWeight: 700, textAlign: "center", padding: 4 }}>
+                                    Drop here
+                                  </div>
+                                )}
+                              </td>
+                            );
+
+                            const m = info.block;
+                            const rowSpan = info.span;
+
+                            if (m.is_break) return (
+                              <td key={day} rowSpan={rowSpan} style={{ border: "1px solid #ddd", textAlign: "center", verticalAlign: "middle", padding: "10px 12px", background: "#fef9c3" }}>
+                                <span style={{ fontSize: 14, color: "#854d0e", fontWeight: 700 }}>☕ Break</span>
+                              </td>
+                            );
+
+                            const isDragging = dragBlock && m.id === dragBlock.id;
+                            const lb = m.roomType === "Laboratory";
+                            const { code, name, type } = resolveSubjectDisplay(m, codeMap);
+                            const sc = getSubjectColor(m.subject, type, m.roomType);
+
+                            return (
+                              <td
+                                key={day}
+                                rowSpan={rowSpan}
+                                style={{
+                                  border: `1px solid #ddd`,
+                                  borderLeft: `4px solid ${sc.cellBorder}`,
+                                  textAlign: "center",
+                                  verticalAlign: "middle",
+                                  padding: "10px 12px",
+                                  background: isDragging ? "rgba(0,0,0,0.04)" : sc.cellBg,
+                                  opacity: isDragging ? 0.45 : 1,
+                                  cursor: m.id ? "grab" : "default",
+                                  transition: "all 0.12s",
+                                  outline: isDragging ? `2px dashed ${theme.primary}` : "none",
+                                }}
+                                draggable={!!m.id}
+                                onDragStart={e => m.id && handleDragStart(e, m)}
+                                onDragOver={e => handleDragOver(e, day, t)}
+                                onDragLeave={() => setDragOver(null)}
+                                onDrop={e => handleDrop(e, day, t, inst)}
+                                onDoubleClick={() => m.id && setEditingBlock(m)}
+                              >
+                                <div style={{ display: "inline-flex", alignItems: "center", background: sc.badgeBg, color: "#fff", borderRadius: 4, padding: "4px 12px", fontSize: 13, fontWeight: 900, letterSpacing: 0.8, textTransform: "uppercase", marginBottom: 3 }}>
+                                  {code || name}
+                                </div>
+                                {m.section && <div style={{ fontSize: 11.5, color: sc.accentColor, fontWeight: 700 }}>{m.section}</div>}
+                                <div style={{ fontSize: 11.5, color: "#475569" }}>{m.room}</div>
+                                <div style={{ fontSize: 11.5, color: sc.accentColor, fontWeight: 700 }}>{lb ? "🔬 Lab" : "📖 Lec"}</div>
+                                {m.id && (
+                                  <div style={{ fontSize: 10, color: "#94a3b8", marginTop: 3 }}>✥ drag</div>
+                                )}
+                              </td>
+                            );
+                          })}
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+        );
+      })}
     </div>
   );
 }
@@ -3171,10 +3224,12 @@ function InlineStudentGrid({ schedules, allSchedules, academicYear, semester, on
     });
   }, [sections.join("|")]);
 
-  // Printable rows use the AM/PM section headings, same as faculty — keeps
-  // each time range compact next to the fixed-height cells.
-  const formatPrintTime = (start, end) =>
-    fmtRange(start, end).replace(/\s(?:AM|PM)\b/gi, "");
+  const formatPrintTime = (start, end) => {
+    const formatted = fmtRange(start, end).replace(/\s(?:AM|PM)\b/gi, "");
+    // Add AM/PM based on start time
+    const isAM = start < 12;
+    return formatted + (isAM ? " AM" : " PM");
+  };
 
   const handlePrint = (section) => {
     const win = window.open("", "_blank");
@@ -3188,118 +3243,316 @@ function InlineStudentGrid({ schedules, allSchedules, academicYear, semester, on
     <title>Class Schedule - ${section}</title>
     <style>
       :root {
-        --page-width: 12.5in;
-        --page-height: 8in;
-        --time-column: 2in;
+        --page-width: 100%;
+        --page-height: auto;
+        --time-column-width: 18%;
+        --day-column-width: calc((100% - 18%) / 7);
+        --base-font-size: 11pt;
       }
-
+      
       * { box-sizing: border-box; margin: 0; padding: 0; }
-      html, body { width: var(--page-width); min-height: var(--page-height); }
-      body { font-family: Arial, sans-serif; font-size: 10pt; color: #000; background: #fff; }
+      
+      html, body { 
+        width: 100%;
+        margin: 0;
+        padding: 0;
+        font-family: Arial, sans-serif;
+        color: #000;
+        background: #fff;
+      }
+      
+      body { 
+        font-size: var(--base-font-size);
+      }
 
       .print-page {
-        width: var(--page-width);
-        height: var(--page-height);
-        overflow: hidden;
-        position: relative;
+        width: 100%;
+        padding: 0.2in;
+        background: white;
       }
 
-      .print-inner { width: 100%; transform-origin: top left; }
+      .print-inner { 
+        width: 100%;
+      }
 
-      /* Keep the time column and seven weekday columns at fixed, stable widths. */
-      .print-table > table {
+      .print-table {
+        width: 100%;
+        overflow-x: auto;
+        margin-bottom: 0.15in;
+      }
+
+      .print-table table {
         width: 100% !important;
         border-collapse: collapse;
         table-layout: fixed !important;
       }
-      .print-table > table col:first-child { width: var(--time-column) !important; }
-      .print-table > table col:not(:first-child) { width: calc((100% - var(--time-column)) / 7) !important; }
-      .print-table > table th:first-child,
-      .print-table > table td:first-child {
-        width: var(--time-column) !important;
-        min-width: var(--time-column) !important;
-        max-width: var(--time-column) !important;
-        white-space: nowrap !important;
+
+      .print-table table col:first-child { 
+        width: var(--time-column-width) !important; 
       }
-      .print-table > table tr,
-      .print-table > table td,
-      .print-table > table th {
+
+      .print-table table col:not(:first-child) { 
+        width: var(--day-column-width) !important; 
+      }
+
+      .print-table table th:first-child,
+      .print-table table td:first-child {
+        width: var(--time-column-width) !important;
+        min-width: var(--time-column-width) !important;
+        max-width: var(--time-column-width) !important;
+      }
+
+      .print-table table thead { 
+        display: table-header-group; 
+      }
+
+      .print-table table tr,
+      .print-table table td,
+      .print-table table th {
         break-inside: avoid;
         page-break-inside: avoid;
       }
-      .print-table > table thead { display: table-header-group; }
 
-      /* Shrink the logo row so the header never starves the table below it. */
-      .print-header > div:first-child { padding-bottom: 6px !important; margin-bottom: 6px !important; }
-      .print-header > div:first-child > div { gap: 10px !important; }
-      .print-header > div:first-child img { width: 50px !important; height: 50px !important; }
-      .print-header > div:first-child > div > div:nth-child(2) > div:nth-child(1) { font-size: 16px !important; }
-      .print-header > div:first-child > div > div:nth-child(2) > div:nth-child(2) { font-size: 13px !important; margin-top: 1px !important; }
-      .print-header > div:first-child > div > div:nth-child(2) > div:nth-child(3) { font-size: 12px !important; margin-top: 1px !important; }
-      .print-header > div:nth-child(2) { font-size: 16px !important; margin: 10px 0 7px !important; }
-      .print-header > div:nth-child(3) { font-size: 12px !important; margin-bottom: 10px !important; }
-      .print-header > div:last-child { font-size: 12px !important; padding: 12px 20px !important; margin-bottom: 12px !important; gap: 28px !important; }
+      .print-header { 
+        width: 100%;
+        margin-bottom: 0.15in;
+      }
 
-      @page { size: 13in 8.5in; margin: 0.25in; }
+      .print-header > div:first-child { 
+        padding-bottom: 6px !important;
+        margin-bottom: 6px !important;
+        border-bottom: 3px double #000;
+      }
+
+      .print-header > div:first-child > div { 
+        gap: 12px !important;
+      }
+
+      .print-header > div:first-child img { 
+        width: 45px !important;
+        height: 45px !important;
+      }
+
+      .print-header > div:first-child > div > div:nth-child(2) > div:nth-child(1) { 
+        font-size: 13pt !important;
+        font-weight: 900;
+      }
+
+      .print-header > div:first-child > div > div:nth-child(2) > div:nth-child(2) { 
+        font-size: 10pt !important;
+        margin-top: 1px !important;
+      }
+
+      .print-header > div:first-child > div > div:nth-child(2) > div:nth-child(3) { 
+        font-size: 9pt !important;
+        margin-top: 1px !important;
+      }
+
+      .print-header > div:nth-child(2) { 
+        font-size: 16pt !important;
+        font-weight: bold;
+        margin: 6px 0 3px !important;
+        text-align: center;
+      }
+
+      .print-header > div:nth-child(3) { 
+        font-size: 10pt !important;
+        margin-bottom: 4px !important;
+        text-align: center;
+      }
+
+      .print-header > div:last-child { 
+        font-size: 9pt !important;
+        padding: 6px 10px !important;
+        margin-bottom: 6px !important;
+        gap: 15px !important;
+      }
+
+      .print-table table thead th {
+        padding: 5px 3px !important;
+        font-size: 8.5pt !important;
+        font-weight: bold;
+        white-space: normal !important;
+        word-break: break-word;
+      }
+
+      .print-table table thead th:first-child {
+        font-size: 8pt !important;
+      }
+
+      .print-table table tbody td:first-child {
+        font-size: 7.5pt !important;
+        font-weight: bold;
+        padding: 2px 3px !important;
+        white-space: normal !important;
+        word-break: break-word;
+      }
+
+      .print-table table tbody td:not(:first-child) {
+        font-size: 7.5pt !important;
+        padding: 3px !important;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+
+      .subject-badge {
+        display: inline-block;
+        padding: 1px 5px !important;
+        border-radius: 2px;
+        font-size: 7.5pt !important;
+        font-weight: bold;
+        margin-bottom: 1px !important;
+      }
+
+      .subject-code {
+        font-size: 7.5pt !important;
+        font-weight: bold;
+        line-height: 1.1;
+      }
+
+      .subject-instructor {
+        font-size: 7pt !important;
+        line-height: 1.1;
+        margin-top: 0;
+      }
+
+      .subject-room {
+        font-size: 7pt !important;
+        line-height: 1.1;
+        margin-top: 0;
+      }
+
+      .subject-type {
+        font-size: 7pt !important;
+        font-weight: bold;
+        margin-top: 0;
+      }
+
+      .lunch-cell {
+        font-size: 9pt !important;
+        font-weight: bold;
+        padding: 3px !important;
+      }
+
+      .break-cell {
+        font-size: 8pt !important;
+        font-weight: bold;
+        padding: 2px !important;
+      }
+
+      /* COMPACT SIGNATURE BLOCK */
+       /* COMPACT SIGNATURE BLOCK */
+.signature-block {
+  width: 100%;
+  margin-top: 0.5in;        /* ⬅️ CHANGE THIS: from 0.1in to 0.6in */
+  padding: 0;
+  margin-bottom: 0.1in;
+}
+
+.signature-row {
+  display: flex;
+  justify-content: space-between;
+  margin-bottom: 0.03in;
+  gap: 40px;
+}
+
+.signature-item {
+  flex: 1;
+  text-align: center;
+}
+
+.signature-line {
+  border-bottom: 1px solid #000;
+  width: 40%;
+  height: 0;
+  margin: 0 auto 0.01in auto;
+}
+
+.signature-label {
+  font-size: 7pt !important;
+  color: #666;
+  margin-bottom: 0.01in;
+  display: none;
+}
+
+.signature-name {
+  font-size: 7.5pt !important;
+  font-weight: bold;
+  margin-top: 0;
+  line-height: 1;
+}
+
+.signature-title {
+  font-size: 6.5pt !important;
+  color: #555;
+  margin-top: 0;
+  line-height: 1;
+}
+
+      @page { 
+        size: A4 landscape;
+        margin: 0.15in;
+      }
 
       @media print {
-        html, body { width: var(--page-width); min-height: var(--page-height); }
-        body { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
-        .print-page { width: var(--page-width); height: var(--page-height); overflow: hidden; }
+        html, body { 
+          width: 100%;
+          margin: 0;
+          padding: 0;
+        }
+        
+        .print-page { 
+          width: 100%;
+          padding: 0.15in;
+          page-break-after: auto;
+        }
+
+        body { 
+          -webkit-print-color-adjust: exact; 
+          print-color-adjust: exact; 
+        }
       }
     </style>
   </head>
   <body>
-    <div class="print-page"><div class="print-inner" id="printInner">${content}</div></div>
+    <div class="print-page">
+      <div class="print-inner" id="printInner">${content}</div>
+    </div>
     <script>
       (function () {
         var printed = false;
 
-        function fitWholePage() {
-          var outer = document.querySelector(".print-page");
-          var inner = document.getElementById("printInner");
-          if (!outer || !inner) return;
-
-          var header = inner.querySelector(".print-header");
-          var tableWrap = inner.querySelector(".print-table");
-          if (!header || !tableWrap) return;
-
-          tableWrap.style.width = "100%";
-          tableWrap.style.transform = "none";
-
-          var availableHeight = outer.clientHeight - header.offsetHeight;
-          var widthScale  = outer.clientWidth / tableWrap.scrollWidth;
-          var heightScale = availableHeight / tableWrap.scrollHeight;
-          var scale = Math.min(1, widthScale, heightScale);
-
-          if (scale > 0 && isFinite(scale) && scale < 1) {
-            tableWrap.style.width = (100 / scale) + "%";
-            tableWrap.style.transform = "scale(" + scale + ")";
-            tableWrap.style.transformOrigin = "top left";
-          }
-        }
-
         function printOnce() {
           if (printed) return;
           printed = true;
-          fitWholePage();
-          setTimeout(function () { window.print(); window.close(); }, 150);
+          
+          var images = Array.prototype.slice.call(document.images);
+          var pending = images.filter(function (image) { return !image.complete; }).length;
+
+          if (!pending) {
+            doPrint();
+          } else {
+            var finished = 0;
+            function imageDone() { 
+              finished += 1; 
+              if (finished >= pending) doPrint(); 
+            }
+            images.forEach(function (image) {
+              image.addEventListener("load", imageDone, { once: true });
+              image.addEventListener("error", imageDone, { once: true });
+            });
+            setTimeout(doPrint, 2000);
+          }
         }
 
-        var images = Array.prototype.slice.call(document.images);
-        var pending = images.filter(function (image) { return !image.complete; }).length;
-
-        if (!pending) {
-          requestAnimationFrame(printOnce);
-        } else {
-          var finished = 0;
-          function imageDone() { finished += 1; if (finished >= pending) printOnce(); }
-          images.forEach(function (image) {
-            image.addEventListener("load", imageDone, { once: true });
-            image.addEventListener("error", imageDone, { once: true });
-          });
-          setTimeout(printOnce, 2000);
+        function doPrint() {
+          setTimeout(function () { 
+            window.print(); 
+            window.close(); 
+          }, 100);
         }
+
+        requestAnimationFrame(printOnce);
       }());
     </script>
   </body>
@@ -3379,7 +3632,6 @@ function InlineStudentGrid({ schedules, allSchedules, academicYear, semester, on
         />
       )}
 
-      {/* Legend row — same subject-color key strip used on the faculty view */}
       <div style={{ marginBottom: 12 }}>
         <SubjectColorLegend blocks={schedules} codeMap={codeMap} />
       </div>
@@ -3424,23 +3676,23 @@ function InlineStudentGrid({ schedules, allSchedules, academicYear, semester, on
               <span style={{ marginLeft: "auto", fontSize: 12, opacity: 0.85 }}>{collapsed[sec] ? "▶ Show" : "▼ Hide"}</span>
             </div>
 
-            {/* Hidden printable schedule — mirrors the faculty print structure exactly */}
+            {/* Hidden printable schedule */}
             <div id={`inline-student-print-${sec}`} style={{ display: "none" }}>
               <div className="print-header">
-                <div style={{ display: "flex", justifyContent: "center", paddingBottom: 14, marginBottom: 14, borderBottom: "3px double #000" }}>
-                  <div style={{ display: "flex", alignItems: "center", gap: 24, maxWidth: 900 }}>
-                    <DeptLogo code={theme.code} style={{ width: 72, height: 72, objectFit: "contain", flexShrink: 0 }} alt={theme.code}/>
+                <div style={{ display: "flex", justifyContent: "center" }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 20, maxWidth: 900 }}>
+                    <DeptLogo code={theme.code} style={{ width: 60, height: 60, objectFit: "contain", flexShrink: 0 }} alt={theme.code}/>
                     <div style={{ textAlign: "center" }}>
-                      <div style={{ fontSize: 21, fontWeight: 900, textTransform: "uppercase" }}>Passi City College</div>
-                      <div style={{ fontSize: 18, fontWeight: 700, color: theme.primary, marginTop: 4 }}>{theme.shortName}</div>
-                      <div style={{ fontSize: 17, color: "#555", marginTop: 3 }}>Barangay Bacuranan, Passi City, Iloilo</div>
+                      <div style={{ fontSize: 13, fontWeight: 900, textTransform: "uppercase" }}>Passi City College</div>
+                      <div style={{ fontSize: 10, fontWeight: 700, color: theme.primary, marginTop: 1 }}>{theme.shortName}</div>
+                      <div style={{ fontSize: 9, color: "#555", marginTop: 1 }}>Barangay Bacuranan, Passi City, Iloilo</div>
                     </div>
-                    <img src={PCCLogo} style={{ width: 72, height: 72, objectFit: "contain", flexShrink: 0 }} alt="PCC"/>
+                    <img src={PCCLogo} style={{ width: 60, height: 60, objectFit: "contain", flexShrink: 0 }} alt="PCC"/>
                   </div>
                 </div>
-                <div style={{ textAlign: "center", fontWeight: "bold", fontSize: 35, textTransform: "uppercase", margin: "8px 0 6px" }}>Class Schedule — {sec}</div>
-                {academicYear && semester && <div style={{ textAlign: "center", fontSize: 15, color: theme.primary, marginBottom: 8 }}>A.Y. {academicYear} · {semester}</div>}
-                <div style={{ background: theme.primary, color: theme.light, fontSize: 18, padding: "12px 20px", marginBottom: 12, display: "flex", gap: 28, flexWrap: "wrap", borderRadius: 4 }}>
+                <div style={{ textTransform: "uppercase" }}>Class Schedule — {sec}</div>
+                {academicYear && semester && <div style={{ color: theme.primary }}>A.Y. {academicYear} · {semester}</div>}
+                <div style={{ background: theme.primary, color: theme.light, padding: "5px 8px", display: "flex", gap: 12, flexWrap: "wrap", borderRadius: 4 }}>
                   <span>⏱ Total: <strong style={{ color: "#fff" }}>{total} hrs</strong></span>
                   <span>📖 Lecture: <strong style={{ color: "#fff" }}>{lecH} hrs</strong></span>
                   <span>🔬 Lab: <strong style={{ color: "#fff" }}>{labH} hrs</strong></span>
@@ -3448,46 +3700,47 @@ function InlineStudentGrid({ schedules, allSchedules, academicYear, semester, on
               </div>
 
               <div className="print-table">
-                <table style={{ width: "100%", borderCollapse: "collapse", tableLayout: "fixed", fontSize: 22 }}>
+                <table style={{ width: "100%" }}>
                   <colgroup>
-                    <col style={{ width: "250px" }} />
-                    {DAYS.map(d => <col key={d} style={{ width: "calc((100% - 250px) / 7)" }} />)}
+                    <col style={{ width: "18%" }} />
+                    {DAYS.map(d => <col key={d} style={{ width: "calc((100% - 18%) / 7)" }} />)}
                   </colgroup>
-                  <thead><tr>
-                    <th style={{ background: theme.primary3 || theme.primary, color: "#fff", border: `1px solid ${theme.primary}`, padding: "10px 8px", fontSize: 20, whiteSpace: "nowrap" }}>TIME : AM</th>
-                    {DAYS.map(d => <th key={d} style={{ background: theme.primary, color: "#fff", border: `1px solid ${theme.primary3 || theme.primary}`, padding: "10px 8px", fontSize: 20 }}>{d}</th>)}
-                  </tr></thead>
+                  <thead>
+                    <tr>
+                      <th style={{ background: theme.primary3 || theme.primary, color: "#fff", border: `1px solid ${theme.primary}` }}>TIME</th>
+                      {DAYS.map(d => <th key={d} style={{ background: theme.primary, color: "#fff", border: `1px solid ${theme.primary3 || theme.primary}` }}>{d}</th>)}
+                    </tr>
+                  </thead>
                   <tbody>
                     {timeSlots.map(t => {
-                      if (t === LUNCH_START) return [
+                      if (t === LUNCH_START) return (
                         <tr key="lunch">
-                          <td style={{ ...printCellBox(1), background: "#fef9c3", border: "1px solid #ddd", padding: "8px 8px", fontWeight: 700, fontSize: 20, textAlign: "center", verticalAlign: "middle", color: "#854d0e", whiteSpace: "nowrap" }}>{formatPrintTime(LUNCH_START, LUNCH_END)}</td>
-                          {DAYS.map(day => <td key={day} style={{ ...printCellBox(1), border: "1px solid #ddd", textAlign: "center", verticalAlign: "middle", padding: "8px 8px", background: "#fef9c3" }}><span style={{ fontSize: 20, color: "#854d0e", fontWeight: 700 }}>🍽 Lunch</span></td>)}
-                        </tr>,
-                        <tr key="pm-time-heading">
-                          <th scope="row" style={{ ...printCellBox(1), background: theme.primary3 || theme.primary, color: "#fff", border: `1px solid ${theme.primary}`, padding: "4px 8px", fontWeight: 700, fontSize: 20, textAlign: "center", verticalAlign: "middle", whiteSpace: "nowrap" }}>TIME : PM</th>
-                          {DAYS.map(day => <td key={day} style={{ ...printCellBox(1), background: "#fff", border: "1px solid #ddd", padding: "4px 8px" }} />)}
-                        </tr>,
-                      ];
+                          <td style={{ background: "#fef9c3", border: "1px solid #ddd" }} className="lunch-cell"></td>
+                          {DAYS.map(day => <td key={day} style={{ border: "1px solid #ddd", background: "#fef9c3", textAlign: "center" }} className="lunch-cell">🍽 Lunch</td>)}
+                        </tr>
+                      );
                       if (t > LUNCH_START && t < LUNCH_END) return null;
+                      
                       const nextT = timeSlots[timeSlots.indexOf(t) + 1] ?? (t + 1);
                       return (
                         <tr key={t}>
-                          <td style={{ ...printCellBox(1), background: theme.light, border: "1px solid #ddd", padding: "10px 8px", fontWeight: 700, fontSize: 18, textAlign: "center", verticalAlign: "middle", color: theme.primary, whiteSpace: "nowrap" }}>{formatPrintTime(t, nextT)}</td>
+                          <td style={{ background: theme.light, border: "1px solid #ddd", textAlign: "center", color: theme.primary, fontWeight: 700 }}>
+                            {formatPrintTime(t, nextT)}
+                          </td>
                           {DAYS.map(day => {
                             const info = getCellSpanInfo(cls, day, t, timeSlots);
                             if (info.kind === "covered") return null;
 
                             if (info.kind === "empty") return (
-                              <td key={day} style={{ ...printCellBox(1), border: "2px solid #ddd", padding: "10px 8px", verticalAlign: "middle", background: "#fff" }} />
+                              <td key={day} style={{ border: "1px solid #ddd", background: "#fff" }} />
                             );
 
                             const m = info.block;
                             const rowSpan = info.span;
 
                             if (m.is_break) return (
-                              <td key={day} rowSpan={rowSpan} style={{ ...printCellBox(rowSpan), border: "1px solid #ddd", textAlign: "center", verticalAlign: "middle", padding: "8px 8px", background: "#fef9c3" }}>
-                                <span style={{ fontSize: 14, color: "#854d0e", fontWeight: 700 }}>☕ Break</span>
+                              <td key={day} rowSpan={rowSpan} style={{ border: "1px solid #ddd", textAlign: "center", background: "#fef9c3" }} className="break-cell">
+                                ☕ Break
                               </td>
                             );
 
@@ -3500,21 +3753,19 @@ function InlineStudentGrid({ schedules, allSchedules, academicYear, semester, on
                                 key={day}
                                 rowSpan={rowSpan}
                                 style={{
-                                  ...printCellBox(rowSpan),
                                   border: `1px solid #ddd`,
-                                  borderLeft: `5px solid ${sc.cellBorder}`,
+                                  borderLeft: `3px solid ${sc.cellBorder}`,
                                   textAlign: "center",
                                   verticalAlign: "middle",
-                                  padding: "14px 10px",
                                   background: sc.cellBg,
                                 }}
                               >
-                                <div style={{ display: "inline-flex", alignItems: "center", background: sc.badgeBg, color: "#fff", borderRadius: 5, padding: "9px 18px", fontSize: 19, fontWeight: 900, letterSpacing: 0.8, textTransform: "uppercase", marginBottom: 6 }}>
+                                <div className="subject-badge" style={{ background: sc.badgeBg, color: "#fff" }}>
                                   {code || name}
                                 </div>
-                                {m.instructor && <div style={{ fontSize: 18, lineHeight: 1.3, color: sc.accentColor, fontWeight: 700 }}>{m.instructor}</div>}
-                                <div style={{ fontSize: 18, lineHeight: 1.3, color: "#475569" }}>{m.room}</div>
-                                <div style={{ fontSize: 18, lineHeight: 1.3, color: sc.accentColor, fontWeight: 700 }}>{lb ? "🔬 Lab" : "📖 Lec"}</div>
+                                {m.instructor && <div className="subject-instructor" style={{ color: sc.accentColor }}>{m.instructor}</div>}
+                                <div className="subject-room" style={{ color: "#475569" }}>{m.room}</div>
+                                <div className="subject-type" style={{ color: sc.accentColor }}>{lb ? "🔬 Lab" : "📖 Lec"}</div>
                               </td>
                             );
                           })}
@@ -3523,7 +3774,24 @@ function InlineStudentGrid({ schedules, allSchedules, academicYear, semester, on
                     })}
                   </tbody>
                 </table>
-                <SignatureBlock/>
+              </div>
+
+              {/* COMPACT SIGNATURE BLOCK */}
+              <div className="signature-block">
+                <div className="signature-row">
+                  <div className="signature-item">
+                    <div className="signature-label">Noted by:</div>
+                    <div className="signature-line"></div>
+                    <div className="signature-name">MYLEN B. PADERES</div>
+                    <div className="signature-title">Dean SOICT</div>
+                  </div>
+                  <div className="signature-item">
+                    <div className="signature-label">Approved by:</div>
+                    <div className="signature-line"></div>
+                    <div className="signature-name">HEIDI A. PAMA</div>
+                    <div className="signature-title">Academic Coordinator</div>
+                  </div>
+                </div>
               </div>
             </div>
 
@@ -3651,9 +3919,6 @@ function InlineStudentGrid({ schedules, allSchedules, academicYear, semester, on
 
 
 
-
-
-/* ════════ DRAG-DROP INLINE ROOM GRID ════════ */
 /* ════════ DRAG-DROP INLINE ROOM GRID ════════ */
 function InlineRoomGrid({ instructorSchedules, studentSchedules, allSchedules, academicYear, semester, onMoveBlock, onCheckMove, theme, codeMap, instructorPool = [] }) {
   const [dragBlock, setDragBlock] = useState(null);
@@ -3676,15 +3941,18 @@ function InlineRoomGrid({ instructorSchedules, studentSchedules, allSchedules, a
     });
   }, [usedRooms.join("|")]);
 
-
-
+  const formatPrintTime = (start, end) => {
+    const formatted = fmtRange(start, end).replace(/\s(?:AM|PM)\b/gi, "");
+    const isAM = start < 12;
+    return formatted + (isAM ? " AM" : " PM");
+  };
 
   const handleDragStart = (e, block) => {
     setDragBlock(block);
     e.dataTransfer.effectAllowed = "move";
   };
 
- const handleDrop = async (e, day, time, room) => {
+  const handleDrop = async (e, day, time, room) => {
     e.preventDefault();
     if (!dragBlock) return;
     setDragOver(null);
@@ -3716,79 +3984,360 @@ function InlineRoomGrid({ instructorSchedules, studentSchedules, allSchedules, a
     setDragOver({ day, time });
   };
 
- const handlePrint = (room) => {
-   const win = window.open("", "_blank");
+  const handlePrint = (room) => {
+    const win = window.open("", "_blank");
     const content = document.getElementById(`inline-room-print-${room.replace(/\s/g, "-")}`)?.innerHTML || "";
-   win.document.write(`<!DOCTYPE html><html><head><title>Room Schedule - ${room}</title><style>
-*{box-sizing:border-box;margin:0;padding:0;}
-body{font-family:Arial,sans-serif;font-size:10pt;color:#000;}
-.print-page{
-  width:281mm;
-  height:194mm;
-  overflow:hidden;
-  position:relative;
+    if (!win) return;
+    if (!content) { win.close(); return; }
+
+    win.document.write(`<!DOCTYPE html>
+<html>
+  <head>
+    <title>Room Schedule - ${room}</title>
+    <style>
+      :root {
+        --page-width: 100%;
+        --page-height: auto;
+        --time-column-width: 18%;
+        --day-column-width: calc((100% - 18%) / 7);
+        --base-font-size: 11pt;
+      }
+      
+      * { box-sizing: border-box; margin: 0; padding: 0; }
+      
+      html, body { 
+        width: 100%;
+        margin: 0;
+        padding: 0;
+        font-family: Arial, sans-serif;
+        color: #000;
+        background: #fff;
+      }
+      
+      body { 
+        font-size: var(--base-font-size);
+      }
+
+      .print-page {
+        width: 100%;
+        padding: 0.2in;
+        background: white;
+      }
+
+      .print-inner { 
+        width: 100%;
+      }
+
+      .print-table {
+        width: 100%;
+        overflow-x: auto;
+        margin-bottom: 0.15in;
+      }
+
+      .print-table table {
+        width: 100% !important;
+        border-collapse: collapse;
+        table-layout: fixed !important;
+      }
+
+      .print-table table col:first-child { 
+        width: var(--time-column-width) !important; 
+      }
+
+      .print-table table col:not(:first-child) { 
+        width: var(--day-column-width) !important; 
+      }
+
+      .print-table table th:first-child,
+      .print-table table td:first-child {
+        width: var(--time-column-width) !important;
+        min-width: var(--time-column-width) !important;
+        max-width: var(--time-column-width) !important;
+      }
+
+      .print-table table thead { 
+        display: table-header-group; 
+      }
+
+      .print-table table tr,
+      .print-table table td,
+      .print-table table th {
+        break-inside: avoid;
+        page-break-inside: avoid;
+      }
+
+      .print-header { 
+        width: 100%;
+        margin-bottom: 0.15in;
+      }
+
+      .print-header > div:first-child { 
+        padding-bottom: 6px !important;
+        margin-bottom: 6px !important;
+        border-bottom: 3px double #000;
+      }
+
+      .print-header > div:first-child > div { 
+        gap: 12px !important;
+      }
+
+      .print-header > div:first-child img { 
+        width: 45px !important;
+        height: 45px !important;
+      }
+
+      .print-header > div:first-child > div > div:nth-child(2) > div:nth-child(1) { 
+        font-size: 13pt !important;
+        font-weight: 900;
+      }
+
+      .print-header > div:first-child > div > div:nth-child(2) > div:nth-child(2) { 
+        font-size: 10pt !important;
+        margin-top: 1px !important;
+      }
+
+      .print-header > div:first-child > div > div:nth-child(2) > div:nth-child(3) { 
+        font-size: 9pt !important;
+        margin-top: 1px !important;
+      }
+
+      .print-header > div:nth-child(2) { 
+        font-size: 16pt !important;
+        font-weight: bold;
+        margin: 6px 0 3px !important;
+        text-align: center;
+      }
+
+      .print-header > div:nth-child(3) { 
+        font-size: 10pt !important;
+        margin-bottom: 4px !important;
+        text-align: center;
+      }
+
+      .print-header > div:nth-child(4) { 
+        font-size: 10pt !important;
+        margin-bottom: 4px !important;
+        text-align: center;
+      }
+
+      .print-header > div:last-child { 
+        font-size: 9pt !important;
+        padding: 6px 10px !important;
+        margin-bottom: 6px !important;
+        gap: 15px !important;
+      }
+
+      .print-table table thead th {
+        padding: 5px 3px !important;
+        font-size: 8.5pt !important;
+        font-weight: bold;
+        white-space: normal !important;
+        word-break: break-word;
+      }
+
+      .print-table table thead th:first-child {
+        font-size: 8pt !important;
+      }
+
+      .print-table table tbody td:first-child {
+        font-size: 7.5pt !important;
+        font-weight: bold;
+        padding: 2px 3px !important;
+        white-space: normal !important;
+        word-break: break-word;
+      }
+
+      .print-table table tbody td:not(:first-child) {
+        font-size: 7.5pt !important;
+        padding: 3px !important;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+
+      .subject-badge {
+        display: inline-block;
+        padding: 1px 5px !important;
+        border-radius: 2px;
+        font-size: 7.5pt !important;
+        font-weight: bold;
+        margin-bottom: 1px !important;
+      }
+
+      .subject-code {
+        font-size: 7.5pt !important;
+        font-weight: bold;
+        line-height: 1.1;
+      }
+
+      .subject-instructor {
+        font-size: 7pt !important;
+        line-height: 1.1;
+        margin-top: 0;
+      }
+
+      .subject-section {
+        font-size: 7pt !important;
+        line-height: 1.1;
+        margin-top: 0;
+      }
+
+      .subject-type {
+        font-size: 7pt !important;
+        font-weight: bold;
+        margin-top: 0;
+      }
+
+      .lunch-cell {
+        font-size: 9pt !important;
+        font-weight: bold;
+        padding: 3px !important;
+      }
+
+      .break-cell {
+        font-size: 8pt !important;
+        font-weight: bold;
+        padding: 2px !important;
+      }
+
+      /* COMPACT SIGNATURE BLOCK */
+      /* COMPACT SIGNATURE BLOCK */
+.signature-block {
+  width: 100%;
+  margin-top: 0.5in;        /* ⬅️ CHANGE THIS: from 0.1in to 0.6in */
+  padding: 0;
+  margin-bottom: 0.1in;
 }
-.print-inner{ transform-origin: top left; }
-table{width:100%;border-collapse:collapse;table-layout:fixed;}
-th:first-child,td:first-child{width:80px;}
-th{background:${theme.primary};color:#fff;font-weight:bold;padding:5px 4px;text-align:center;border:1px solid ${theme.primary3||theme.primary};font-size:8pt;}
-td{border:1px solid #ddd;padding:3px;text-align:center;vertical-align:middle;height:34px;font-size:8pt;}
-thead{display:table-header-group;}
-@media print{@page{margin:8mm;size:A4 landscape;}body{-webkit-print-color-adjust:exact;print-color-adjust:exact;}}
-</style></head><body>
-<div class="print-page" id="printPage"><div class="print-inner" id="printInner">${content}</div></div>
-<script>
-  function fitAndPrint() {
-    var outer = document.getElementById('printPage');
-    var inner = document.getElementById('printInner');
-    var availH = outer.clientHeight;
-    var naturalH = inner.scrollHeight;
-    if (naturalH > availH) {
-      var scale = (availH / naturalH) * 0.98;
-      inner.style.transform = 'scale(' + scale + ')';
-      inner.style.width = (100 / scale) + '%';
-    }
-    setTimeout(function () { window.print(); window.close(); }, 150);
-  }
-  var imgs = Array.prototype.slice.call(document.images);
-  var pending = imgs.filter(function (img) { return !img.complete; }).length;
-  if (pending === 0) {
-    fitAndPrint();
-  } else {
-    var done = 0;
-    imgs.forEach(function (img) {
-      img.addEventListener('load', check);
-      img.addEventListener('error', check);
-    });
-    function check() { done++; if (done >= pending) fitAndPrint(); }
-    setTimeout(fitAndPrint, 2000);
-  }
-</script>
-</body></html>`);
-    win.document.close(); win.focus();
+
+.signature-row {
+  display: flex;
+  justify-content: space-between;
+  margin-bottom: 0.03in;
+  gap: 40px;
+}
+
+.signature-item {
+  flex: 1;
+  text-align: center;
+}
+
+.signature-line {
+  border-bottom: 1px solid #000;
+  width: 40%;
+  height: 0;
+  margin: 0 auto 0.01in auto;
+}
+
+.signature-label {
+  font-size: 7pt !important;
+  color: #666;
+  margin-bottom: 0.01in;
+  display: none;
+}
+
+.signature-name {
+  font-size: 7.5pt !important;
+  font-weight: bold;
+  margin-top: 0;
+  line-height: 1;
+}
+
+.signature-title {
+  font-size: 6.5pt !important;
+  color: #555;
+  margin-top: 0;
+  line-height: 1;
+}
+
+      @page { 
+        size: A4 landscape;
+        margin: 0.15in;
+      }
+
+      @media print {
+        html, body { 
+          width: 100%;
+          margin: 0;
+          padding: 0;
+        }
+        
+        .print-page { 
+          width: 100%;
+          padding: 0.15in;
+          page-break-after: auto;
+        }
+
+        body { 
+          -webkit-print-color-adjust: exact; 
+          print-color-adjust: exact; 
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="print-page">
+      <div class="print-inner" id="printInner">${content}</div>
+    </div>
+    <script>
+      (function () {
+        var printed = false;
+
+        function printOnce() {
+          if (printed) return;
+          printed = true;
+          
+          var images = Array.prototype.slice.call(document.images);
+          var pending = images.filter(function (image) { return !image.complete; }).length;
+
+          if (!pending) {
+            doPrint();
+          } else {
+            var finished = 0;
+            function imageDone() { 
+              finished += 1; 
+              if (finished >= pending) doPrint(); 
+            }
+            images.forEach(function (image) {
+              image.addEventListener("load", imageDone, { once: true });
+              image.addEventListener("error", imageDone, { once: true });
+            });
+            setTimeout(doPrint, 2000);
+          }
+        }
+
+        function doPrint() {
+          setTimeout(function () { 
+            window.print(); 
+            window.close(); 
+          }, 100);
+        }
+
+        requestAnimationFrame(printOnce);
+      }());
+    </script>
+  </body>
+</html>`);
+    win.document.close();
+    win.focus();
   };
 
-return (
+  return (
     <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
-     {toast && (
+      {toast && (
         <ConflictToast
           conflicts={toast.conflicts}
           allSchedules={allSchedules}
           onClose={() => setToast(null)}
           onMoveSchedule={async (block, sg) => {
-            
-  const target = toast?.movedBlock || block;
-  const targetRoom  = sg.room || target.room;
-  const targetStart = Number(sg.start);
-  const targetEnd   = Number(sg.end);
-  if (!targetRoom || targetStart === undefined || targetEnd === undefined || targetStart >= targetEnd) return;
-  const payload = { day: sg.day, start: targetStart, end: targetEnd, room: targetRoom, roomType: getRoomType(targetRoom) };
-  if (sg.instructor) payload.instructor = sg.instructor;
-  await onMoveBlock(target, payload);
-  setToast(null);
-}}
-
-
+            const target = toast?.movedBlock || block;
+            const targetRoom  = sg.room || target.room;
+            const targetStart = Number(sg.start);
+            const targetEnd   = Number(sg.end);
+            if (!targetRoom || targetStart === undefined || targetEnd === undefined || targetStart >= targetEnd) return;
+            const payload = { day: sg.day, start: targetStart, end: targetEnd, room: targetRoom, roomType: getRoomType(targetRoom) };
+            if (sg.instructor) payload.instructor = sg.instructor;
+            await onMoveBlock(target, payload);
+            setToast(null);
+          }}
           instructorPool={instructorPool}
         />
       )}
@@ -3805,7 +4354,9 @@ return (
         />
       )}
 
-    
+      <div style={{ marginBottom: 12 }}>
+        <SubjectColorLegend blocks={allBlocks} codeMap={codeMap} />
+      </div>
 
       {/* Filter bar */}
       <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", background: theme.light2, borderRadius: 8, padding: "10px 16px", border: `1px solid ${theme.border}` }}>
@@ -3835,20 +4386,26 @@ return (
           const dayBlocks = rawBlocks.filter(b => b.day === day);
           return dayBlocks.length ? insertBreaks(dayBlocks) : [];
         });
+        const realBlocks = blocks.filter(s => !s.is_break);
+        const total = realBlocks.reduce((s, c) => s + (c.end - c.start), 0);
+        const labH  = realBlocks.filter(c => c.roomType === "Laboratory").reduce((s, c) => s + (c.end - c.start), 0);
+        const lecH  = realBlocks.filter(c => c.roomType === "Lecture").reduce((s, c) => s + (c.end - c.start), 0);
         const timeSlots = buildPrintTimeSlots(blocks);
-
 
         return (
           <div key={room} style={{ border: `1px solid ${theme.border}`, borderRadius: 10, overflow: "hidden" }}>
             {/* Room header */}
-           <div
+            <div
               style={{ background: isLab ? theme.primary : "#16a34a", color: "#fff", padding: "9px 16px", display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap", cursor: "pointer", userSelect: "none" }}
               onClick={() => setCollapsed(prev => ({ ...prev, [room]: !prev[room] }))}
             >
               <span style={{ fontSize: 18 }}>{isLab ? "🔬" : "📖"}</span>
               <span style={{ fontWeight: 700, fontSize: 14 }}>{room}</span>
               <span style={{ fontSize: 11, opacity: 0.8 }}>{isLab ? "Laboratory" : "Lecture Room"}</span>
-              <span style={{ fontSize: 11, opacity: 0.7 }}>· {blocks.length} block(s)</span>
+              <span style={{ fontSize: 11, opacity: 0.7 }}>· {realBlocks.length} subject(s)</span>
+              <span style={{ fontSize: 11, opacity: 0.8 }}>⏱ {total} hrs total</span>
+              <span style={{ fontSize: 11, opacity: 0.8 }}>📖 Lecture: {lecH}h</span>
+              <span style={{ fontSize: 11, opacity: 0.8 }}>🔬 Lab: {labH}h</span>
               <button
                 onClick={e => { e.stopPropagation(); handlePrint(room); }}
                 style={{ padding: "5px 14px", background: "rgba(255,255,255,0.15)", color: "#fff", border: "1px solid rgba(255,255,255,0.3)", borderRadius: 7, cursor: "pointer", fontSize: 11, fontWeight: 600 }}
@@ -3858,156 +4415,240 @@ return (
               <span style={{ marginLeft: "auto", fontSize: 12, opacity: 0.85 }}>{collapsed[room] ? "▶ Show" : "▼ Hide"}</span>
             </div>
 
-           {/* Hidden printable area */}
+            {/* Hidden printable area */}
             <div id={`inline-room-print-${room.replace(/\s/g, "-")}`} style={{ display: "none" }}>
-              <div style={{ display: "flex", justifyContent: "center", paddingBottom: 8, marginBottom: 8, borderBottom: "3px double #000" }}>
-                <div style={{ display: "flex", alignItems: "center", gap: 12, maxWidth: 460 }}>
-                  <DeptLogo code={theme.code} style={{ width: 48, height: 48, objectFit: "contain", flexShrink: 0 }} alt={theme.code}/>
-                  <div style={{ textAlign: "center" }}>
-                    <div style={{ fontSize: 14, fontWeight: 900, textTransform: "uppercase" }}>Passi City College</div>
-                    <div style={{ fontSize: 10, fontWeight: 700, color: theme.primary, marginTop: 2 }}>{theme.shortName}</div>
-                    <div style={{ fontSize: 8, color: "#555", marginTop: 1 }}>Passi City, Iloilo, Philippines</div>
+              <div className="print-header">
+                <div style={{ display: "flex", justifyContent: "center" }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 20, maxWidth: 900 }}>
+                    <DeptLogo code={theme.code} style={{ width: 60, height: 60, objectFit: "contain", flexShrink: 0 }} alt={theme.code}/>
+                    <div style={{ textAlign: "center" }}>
+                      <div style={{ fontSize: 13, fontWeight: 900, textTransform: "uppercase" }}>Passi City College</div>
+                      <div style={{ fontSize: 10, fontWeight: 700, color: theme.primary, marginTop: 1 }}>{theme.shortName}</div>
+                      <div style={{ fontSize: 9, color: "#555", marginTop: 1 }}>Barangay Bacuranan, Passi City, Iloilo</div>
+                    </div>
+                    <img src={PCCLogo} style={{ width: 60, height: 60, objectFit: "contain", flexShrink: 0 }} alt="PCC"/>
                   </div>
-                  <img src={PCCLogo} style={{ width: 48, height: 48, objectFit: "contain", flexShrink: 0 }} alt="PCC"/>
+                </div>
+                <div style={{ textTransform: "uppercase" }}>Room Schedule — {room}</div>
+                <div style={{ fontSize: 10, color: "#666" }}>{isLab ? "🔬 Laboratory" : "📖 Lecture Room"}</div>
+                {academicYear && semester && <div style={{ color: theme.primary, textAlign: "center" }}>A.Y. {academicYear} · {semester}</div>}
+                <div style={{ background: theme.primary, color: theme.light, padding: "5px 8px", display: "flex", gap: 12, flexWrap: "wrap", borderRadius: 4 }}>
+                  <span>⏱ Total: <strong style={{ color: "#fff" }}>{total} hrs</strong></span>
+                  <span>📖 Lecture: <strong style={{ color: "#fff" }}>{lecH} hrs</strong></span>
+                  <span>🔬 Lab: <strong style={{ color: "#fff" }}>{labH} hrs</strong></span>
                 </div>
               </div>
-              <div style={{ textAlign: "center", fontWeight: "bold", fontSize: 13, textTransform: "uppercase", margin: "8px 0 4px" }}>Room Schedule — {room}</div>
-              <div style={{ textAlign: "center", fontSize: 11, fontWeight: 700, color: theme.primary, marginBottom: 3 }}>{room} — {isLab ? "Laboratory" : "Lecture Room"}</div>
-              {academicYear && semester && <div style={{ textAlign: "center", fontSize: 10, color: theme.primary, marginBottom: 6 }}>A.Y. {academicYear} · {semester}</div>}
-              <table style={{ width: "100%", borderCollapse: "collapse", tableLayout: "fixed", fontSize: 8 }}>
-                <thead><tr>
-                  <th style={{ background: theme.primary, color: "#fff", border: `1px solid ${theme.primary3 || theme.primary}`, padding: "6px 4px", width: 80 }}>Time</th>
-                  {DAYS.map(d => <th key={d} style={{ background: theme.primary, color: "#fff", border: `1px solid ${theme.primary3 || theme.primary}`, padding: "6px 4px" }}>{d}</th>)}
-                </tr></thead>
-                <tbody>
-  {timeSlots.map(t => {
-    if (t === LUNCH_START) return (
-      <tr key="lunch">
-        <td style={{ background: "#fef9c3", border: "1px solid #ddd", padding: "3px 4px", fontWeight: 700, fontSize: 7.5, textAlign: "center", color: "#854d0e", height: 28 }}>{fmtRange(LUNCH_START, LUNCH_END)}</td>
-        {DAYS.map(day => <td key={day} style={{ border: "1px solid #ddd", textAlign: "center", height: 28, background: "#fef9c3" }}><span style={{ fontSize: 8, color: "#854d0e", fontWeight: 700 }}>🍽 Lunch</span></td>)}
-      </tr>
-    );
-    if (t > LUNCH_START && t < LUNCH_END) return null;
-    const nextT = timeSlots[timeSlots.indexOf(t) + 1] ?? (t + 1);
-    return (
-      <tr key={t}>
-        <td style={{ background: theme.light, border: "1px solid #ddd", padding: "3px 4px", fontWeight: 700, fontSize: 7.5, textAlign: "center", color: theme.primary, height: 40 }}>{fmtRange(t, nextT)}</td>
-        {DAYS.map(day => {
-          const info = getCellSpanInfo(blocks, day, t, timeSlots);
-          if (info.kind === "covered") return null;
 
-          if (info.kind === "empty") return (
-            <td key={day} style={{ border: "1px solid #ddd", height: 40, background: "#fff" }}/>
-          );
+              <div className="print-table">
+                <table style={{ width: "100%" }}>
+                  <colgroup>
+                    <col style={{ width: "18%" }} />
+                    {DAYS.map(d => <col key={d} style={{ width: "calc((100% - 18%) / 7)" }} />)}
+                  </colgroup>
+                  <thead>
+                    <tr>
+                      <th style={{ background: theme.primary3 || theme.primary, color: "#fff", border: `1px solid ${theme.primary}` }}>TIME</th>
+                      {DAYS.map(d => <th key={d} style={{ background: theme.primary, color: "#fff", border: `1px solid ${theme.primary3 || theme.primary}` }}>{d}</th>)}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {timeSlots.map(t => {
+                      if (t === LUNCH_START) return (
+                        <tr key="lunch">
+                          <td style={{ background: "#fef9c3", border: "1px solid #ddd" }} className="lunch-cell"></td>
+                          {DAYS.map(day => <td key={day} style={{ border: "1px solid #ddd", background: "#fef9c3", textAlign: "center" }} className="lunch-cell">🍽 Lunch</td>)}
+                        </tr>
+                      );
+                      if (t > LUNCH_START && t < LUNCH_END) return null;
+                      
+                      const nextT = timeSlots[timeSlots.indexOf(t) + 1] ?? (t + 1);
+                      return (
+                        <tr key={t}>
+                          <td style={{ background: theme.light, border: "1px solid #ddd", textAlign: "center", color: theme.primary, fontWeight: 700 }}>
+                            {formatPrintTime(t, nextT)}
+                          </td>
+                          {DAYS.map(day => {
+                            const info = getCellSpanInfo(blocks, day, t, timeSlots);
+                            if (info.kind === "covered") return null;
 
-          const m = info.block;
-          const rowSpan = info.span;
+                            if (info.kind === "empty") return (
+                              <td key={day} style={{ border: "1px solid #ddd", background: "#fff" }} />
+                            );
 
-          if (m.is_break) return (
-            <td key={day} rowSpan={rowSpan} style={{ border: "1px solid #ddd", textAlign: "center", height: 40 * rowSpan, background: "#fef9c3" }}>
-              <span style={{ fontSize: 8, color: "#854d0e", fontWeight: 700 }}>☕ Break</span>
-            </td>
-          );
+                            const m = info.block;
+                            const rowSpan = info.span;
 
-          const lb = isLab;
-          const { code, name, type } = resolveSubjectDisplay(m, codeMap);
-          const badgeBg = getBadgeBg(type, theme);
+                            if (m.is_break) return (
+                              <td key={day} rowSpan={rowSpan} style={{ border: "1px solid #ddd", textAlign: "center", background: "#fef9c3" }} className="break-cell">
+                                ☕ Break
+                              </td>
+                            );
 
-          return (
-            <td key={day} rowSpan={rowSpan} style={{ border: "1px solid #ddd", textAlign: "center", verticalAlign: "middle", height: 40 * rowSpan, background: lb ? theme.light2 : "#f0fdf4" }}>
-              <div style={{ display: "inline-flex", alignItems: "center", background: badgeBg, color: "#fff", borderRadius: 4, padding: "2px 8px", fontSize: 10, fontWeight: 900, letterSpacing: 0.8, textTransform: "uppercase", marginBottom: 2 }}>
-                {code || name}
+                            const lb = m.roomType === "Laboratory";
+                            const { code, name, type } = resolveSubjectDisplay(m, codeMap);
+                            const sc = getSubjectColor(m.subject, type, m.roomType);
+
+                            return (
+                              <td
+                                key={day}
+                                rowSpan={rowSpan}
+                                style={{
+                                  border: `1px solid #ddd`,
+                                  borderLeft: `3px solid ${sc.cellBorder}`,
+                                  textAlign: "center",
+                                  verticalAlign: "middle",
+                                  background: sc.cellBg,
+                                }}
+                              >
+                                <div className="subject-badge" style={{ background: sc.badgeBg, color: "#fff" }}>
+                                  {code || name}
+                                </div>
+                                {m.instructor && <div className="subject-instructor" style={{ color: sc.accentColor }}>{m.instructor}</div>}
+                                {m.section && <div className="subject-section" style={{ color: "#475569" }}>{m.section}</div>}
+                                <div className="subject-type" style={{ color: sc.accentColor }}>{lb ? "🔬 Lab" : "📖 Lec"}</div>
+                              </td>
+                            );
+                          })}
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
               </div>
-              {m.instructor && <div style={{ fontSize: 9, color: theme.primary, fontWeight: 700 }}>{m.instructor}</div>}
-              {m.section && <div style={{ fontSize: 9, color: "#475569" }}>{m.section}</div>}
-              <div style={{ fontSize: 9, color: lb ? theme.text : "#166534", fontWeight: 700 }}>{lb ? "🔬 Lab" : "📖 Lec"}</div>
-            </td>
-          );
-        })}
-      </tr>
-    );
-  })}
-</tbody>
-    </table>
-     <SignatureBlock/>
+
+              {/* COMPACT SIGNATURE BLOCK */}
+              <div className="signature-block">
+                <div className="signature-row">
+                  <div className="signature-item">
+                    <div className="signature-label">Noted by:</div>
+                    <div className="signature-line"></div>
+                    <div className="signature-name">MYLEN B. PADERES</div>
+                    <div className="signature-title">Dean SOICT</div>
+                  </div>
+                  <div className="signature-item">
+                    <div className="signature-label">Approved by:</div>
+                    <div className="signature-line"></div>
+                    <div className="signature-name">HEIDI A. PAMA</div>
+                    <div className="signature-title">Academic Coordinator</div>
+                  </div>
+                </div>
+              </div>
             </div>
             
-           {!collapsed[room] && (
-            <div style={{ overflowX: "auto" }}>
-              <table style={{ width: "100%", borderCollapse: "collapse", tableLayout: "fixed", fontSize: 12 }}>
-                <thead>
-                  <tr>
-                    <th style={{ background: isLab ? theme.primary : "#16a34a",color: "#fff", padding: "7px 10px", border: `1px solid ${isLab ? theme.primary3 || theme.primary : "#15803d"}`, width: 120, minWidth: 120, textAlign: "center", fontSize: 11 }}>Time</th>
-                    {DAYS.map(d => (
-                      <th key={d} style={{ background: isLab ? theme.primary : "#16a34a", color: "#fff", padding: "7px 8px", border: `1px solid ${isLab ? theme.primary3 || theme.primary : "#15803d"}`, textAlign: "center", fontSize: 11, minWidth: 115 }}>{d}</th>
-                    ))}
-                  </tr>
-                </thead>
-                <tbody>
-                  {timeSlots.map(t => {
-                    if (t === LUNCH_START) return (
-                      <tr key="lunch">
-                        <td style={{ background: "#fef9c3", border: "1px solid #ddd", fontWeight: 700, fontSize: 10, textAlign: "center", color: "#854d0e", height: 28 }}>{fmtRange(LUNCH_START, LUNCH_END)}</td>
-                        {DAYS.map(day => <td key={day} style={{ border: "1px solid #ddd", textAlign: "center", height: 28, background: "#fef9c3" }}><span style={{ fontSize: 10, color: "#854d0e", fontWeight: 700 }}>🍽 Lunch</span></td>)}
-                      </tr>
-                    );
-                    if (t > LUNCH_START && t < LUNCH_END) return null;
-                    const nextT = timeSlots[timeSlots.indexOf(t) + 1] ?? (t + 1);
+            {!collapsed[room] && (
+              <div style={{ overflowX: "auto" }}>
+                <table style={{ width: "100%", borderCollapse: "collapse", tableLayout: "fixed", fontSize: 12 }}>
+                  <colgroup>
+                    <col style={{ width: "160px" }} />
+                    {DAYS.map(d => <col key={d} style={{ width: "calc((100% - 160px) / 7)" }} />)}
+                  </colgroup>
+                  <thead>
+                    <tr>
+                      <th style={{ background: isLab ? theme.primary : "#16a34a", color: "#fff", padding: "14px 16px", border: `1px solid ${isLab ? theme.primary3 || theme.primary : "#15803d"}`, textAlign: "center", fontSize: 14 }}>Time</th>
+                      {DAYS.map(d => (
+                        <th key={d} style={{ background: isLab ? theme.primary : "#16a34a", color: "#fff", padding: "14px 12px", border: `1px solid ${isLab ? theme.primary3 || theme.primary : "#15803d"}`, textAlign: "center", fontSize: 14 }}>{d}</th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {timeSlots.map(t => {
+                      const nextT = timeSlots[timeSlots.indexOf(t) + 1] ?? (t + 1);
+                      if (t === LUNCH_START) return (
+                        <tr key="lunch">
+                          <td style={{ background: theme.light, border: "1px solid #ddd", padding: "4px 8px", fontWeight: 700, fontSize: 13, textAlign: "center", verticalAlign: "middle", color: theme.primary, whiteSpace: "nowrap" }}>
+                            {fmtRange(t, nextT)}
+                          </td>
+                          {DAYS.map(day => <td key={day} style={{ border: "1px solid #ddd", textAlign: "center", verticalAlign: "middle", padding: "10px 12px", background: "#fef9c3" }}><span style={{ fontSize: 12, color: "#854d0e", fontWeight: 700 }}>🍽 Lunch</span></td>)}
+                        </tr>
+                      );
+                      if (t > LUNCH_START && t < LUNCH_END) return null;
+                      return (
+                        <tr key={t}>
+                          <td style={{ background: theme.light, border: "1px solid #ddd", padding: "10px 12px", fontWeight: 700, fontSize: 13, textAlign: "center", verticalAlign: "middle", color: theme.primary, whiteSpace: "nowrap" }}>{fmtRange(t, nextT)}</td>
+                          {DAYS.map(day => {
+                            const info = getCellSpanInfo(blocks, day, t, timeSlots);
+                            if (info.kind === "covered") return null;
 
-                    return (
-                      <tr key={t}>
-                        <td style={{ background: theme.light, border: "1px solid #ddd", fontWeight: 700, fontSize: 10, textAlign: "center", color: theme.primary, height: 44, whiteSpace: "nowrap", padding: "4px 8px", width: 120, minWidth: 120 }}>
-                          {fmtRange(t, nextT)}
-                        </td>
-                        {DAYS.map(day => {
-                          const m   = blocks.find(c => c.day === day && Number(c.start) <= t && Number(c.end) > t);
-                          const isDragTarget = dragOver?.day === day && dragOver?.time === t;
-                          const isDragging   = dragBlock && m && m.id === dragBlock.id;
-                          const lb = isLab;
+                            const isDragTarget = dragOver?.day === day && dragOver?.time === t;
 
-                          if (!m) return (
-                            <td
-                              key={day}
-                              style={{ border: `2px solid ${isDragTarget ? (isLab ? theme.primary : "#16a34a") : "#ddd"}`, height: 44, background: isDragTarget ? theme.light2 : "#fff", transition: "all 0.12s", cursor: dragBlock ? "copy" : "default" }}
-                              onDragOver={e => handleDragOver(e, day, t)}
-                              onDragLeave={() => setDragOver(null)}
-                              onDrop={e => handleDrop(e, day, t, room)}
-                            >
-                              {isDragTarget && <div style={{ fontSize: 10, color: theme.primary, fontWeight: 700, textAlign: "center", padding: 4 }}>Drop here</div>}
-                            </td>
-                          );
+                            if (info.kind === "empty") return (
+                              <td
+                                key={day}
+                                style={{
+                                  border: `2px solid ${isDragTarget ? (isLab ? theme.primary : "#16a34a") : "#ddd"}`,
+                                  padding: "10px 12px",
+                                  verticalAlign: "middle",
+                                  background: isDragTarget ? theme.light2 : "#fff",
+                                  transition: "all 0.12s",
+                                  cursor: dragBlock ? "copy" : "default",
+                                }}
+                                onDragOver={e => handleDragOver(e, day, t)}
+                                onDragLeave={() => setDragOver(null)}
+                                onDrop={e => handleDrop(e, day, t, room)}
+                              >
+                                {isDragTarget && (
+                                  <div style={{ fontSize: 11, color: theme.primary, fontWeight: 700, textAlign: "center", padding: 4 }}>
+                                    Drop here
+                                  </div>
+                                )}
+                              </td>
+                            );
 
-                          const { code, name, type } = resolveSubjectDisplay(m, codeMap);
-                          const badgeBg = getBadgeBg(type, theme);
+                            const m = info.block;
+                            const rowSpan = info.span;
 
-                          return (
-                            <td
-                              key={day}
-                              style={{ border: "1px solid #ddd", textAlign: "center", verticalAlign: "middle", height: 44, background: isDragging ? "rgba(0,0,0,0.04)" : (lb ? theme.light2 : "#f0fdf4"), opacity: isDragging ? 0.45 : 1, cursor: m.id ? "grab" : "default", transition: "all 0.12s", outline: isDragging ? `2px dashed ${theme.primary}` : "none" }}
-                              draggable={!!m.id}
-                              onDragStart={e => m.id && handleDragStart(e, m)}
-                              onDragOver={e => handleDragOver(e, day, t)}
-                              onDragLeave={() => setDragOver(null)}
-                              onDrop={e => handleDrop(e, day, t, room)}
-                              onDoubleClick={() => m.id && setEditingBlock(m)}
-                            >
+                            if (m.is_break) return (
+                              <td key={day} rowSpan={rowSpan} style={{ border: "1px solid #ddd", textAlign: "center", verticalAlign: "middle", padding: "10px 12px", background: "#fef9c3" }}>
+                                <span style={{ fontSize: 14, color: "#854d0e", fontWeight: 700 }}>☕ Break</span>
+                              </td>
+                            );
 
-                              <div style={{ display: "inline-flex", alignItems: "center", background: badgeBg, color: "#fff", borderRadius: 4, padding: "2px 8px", fontSize: 10, fontWeight: 900, letterSpacing: 0.8, textTransform: "uppercase", marginBottom: 2 }}>
-                                {code || name}
-                              </div>
-                              {m.instructor && <div style={{ fontSize: 9, color: theme.primary, fontWeight: 700 }}>{m.instructor}</div>}
-                              {m.section && <div style={{ fontSize: 9, color: "#475569" }}>{m.section}</div>}
-                              <div style={{ fontSize: 9, color: lb ? theme.text : "#166534", fontWeight: 700 }}>{lb ? "🔬 Lab" : "📖 Lec"}</div>
-                              {m.id && <div style={{ fontSize: 8, color: "#94a3b8", marginTop: 2 }}>✥ drag</div>}
-                            </td>
-                          );
-                        })}
-                      </tr>
-                    );
-                  })}
-             </tbody>
-              </table>
-            </div>
+                            const isDragging = dragBlock && m.id === dragBlock.id;
+                            const lb = m.roomType === "Laboratory";
+                            const { code, name, type } = resolveSubjectDisplay(m, codeMap);
+                            const sc = getSubjectColor(m.subject, type, m.roomType);
+
+                            return (
+                              <td
+                                key={day}
+                                rowSpan={rowSpan}
+                                style={{
+                                  border: `1px solid #ddd`,
+                                  borderLeft: `4px solid ${sc.cellBorder}`,
+                                  textAlign: "center",
+                                  verticalAlign: "middle",
+                                  padding: "10px 12px",
+                                  background: isDragging ? "rgba(0,0,0,0.04)" : sc.cellBg,
+                                  opacity: isDragging ? 0.45 : 1,
+                                  cursor: m.id ? "grab" : "default",
+                                  transition: "all 0.12s",
+                                  outline: isDragging ? `2px dashed ${theme.primary}` : "none",
+                                }}
+                                draggable={!!m.id}
+                                onDragStart={e => m.id && handleDragStart(e, m)}
+                                onDragOver={e => handleDragOver(e, day, t)}
+                                onDragLeave={() => setDragOver(null)}
+                                onDrop={e => handleDrop(e, day, t, room)}
+                                onDoubleClick={() => m.id && setEditingBlock(m)}
+                              >
+                                <div style={{ display: "inline-flex", alignItems: "center", background: sc.badgeBg, color: "#fff", borderRadius: 4, padding: "4px 12px", fontSize: 13, fontWeight: 900, letterSpacing: 0.8, textTransform: "uppercase", marginBottom: 3 }}>
+                                  {code || name}
+                                </div>
+                                {m.instructor && <div style={{ fontSize: 11.5, color: sc.accentColor, fontWeight: 700 }}>{m.instructor}</div>}
+                                {m.section && <div style={{ fontSize: 11.5, color: "#475569" }}>{m.section}</div>}
+                                <div style={{ fontSize: 11.5, color: sc.accentColor, fontWeight: 700 }}>{lb ? "🔬 Lab" : "📖 Lec"}</div>
+                                {m.id && (
+                                  <div style={{ fontSize: 10, color: "#94a3b8", marginTop: 3 }}>✥ drag</div>
+                                )}
+                              </td>
+                            );
+                          })}
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
             )}
           </div>
         );
@@ -4368,73 +5009,87 @@ const handleLinkedMove = async (block, suggestion, sourceTable) => {
       </div>
     );
   }
+/* ── ACADEMIC SETUP ── */
+if (activePage==="Academic Setup") {
+  const save=async()=>{
+    if(!ay.trim()) return alert("Please select an Academic Year.");
+    try {
+      const res=await fetch("/api/academic",{method:"POST",credentials:"include",headers:{"Content-Type":"application/json"},body:JSON.stringify({year:ay,semester:sem})});
+      const s=await res.json();
+      setData(prev=>({...prev,academicYear:s.year||ay,semester:s.semester||sem,academicYearId:s.id}));
+    } catch {setData(prev=>({...prev,academicYear:ay,semester:sem}));}
+    alert("Academic setup saved!");
+  };
 
-  /* ── ACADEMIC SETUP ── */
-  if (activePage==="Academic Setup") {
-    const save=async()=>{
-      if(!ay.trim()) return alert("Please enter an Academic Year.");
-      try {
-        const res=await fetch("/api/academic",{method:"POST",credentials:"include",headers:{"Content-Type":"application/json"},body:JSON.stringify({year:ay,semester:sem})});
-        const s=await res.json();
-        setData(prev=>({...prev,academicYear:s.year||ay,semester:s.semester||sem,academicYearId:s.id}));
-      } catch {setData(prev=>({...prev,academicYear:ay,semester:sem}));}
-      alert("Academic setup saved!");
-    };
-    const semesterOptions = [
-      { value:"1st Semester", icon:"🌱", desc:"August – December", color:"#16a34a", bg:"#dcfce7", border:"#86efac" },
-      { value:"2nd Semester", icon:"🌸", desc:"January – May",     color:"#d97706", bg:"#fef9c3", border:"#fde68a" },
-    ];
-    return (
-      <div style={{display:"flex",flexDirection:"column",gap:20,width:"100%",maxWidth:700,alignSelf:"flex-start"}}>
-        <div style={{background:theme.headerBg,borderRadius:12,padding:"20px 26px",display:"flex",alignItems:"center",gap:16,flexWrap:"wrap"}}>
-          <span style={{fontSize:36}}>🏫</span>
-          <div><div style={{color:"#fff",fontWeight:800,fontSize:18}}>Academic Setup</div><div style={{color:"rgba(255,255,255,0.65)",fontSize:12,marginTop:3}}>Configure the current Academic Year and active Semester for {theme.code}</div></div>
-        </div>
-        {(data.academicYear || data.semester) && (
-          <div style={{background:"#fff",borderRadius:12,padding:"18px 22px",boxShadow:`0 2px 8px rgba(0,0,0,0.07)`,border:`1px solid ${theme.light2}`,display:"flex",alignItems:"center",gap:16,flexWrap:"wrap"}}>
-            <div style={{fontSize:28}}>📌</div>
-            <div>
-              <div style={{fontSize:12,fontWeight:600,color:"#64748b",marginBottom:4}}>Currently Saved</div>
-              <div style={{display:"flex",gap:8,flexWrap:"wrap",alignItems:"center"}}>
-                {data.academicYear&&<span style={{display:"inline-flex",alignItems:"center",gap:6,background:theme.light2,color:theme.text,border:`1px solid ${theme.border}`,borderRadius:8,padding:"5px 14px",fontSize:13,fontWeight:700}}>📅 A.Y. {data.academicYear}</span>}
-                {data.semester&&<span style={{display:"inline-flex",alignItems:"center",gap:6,background:"#fefce8",color:"#854d0e",border:"1px solid #fde68a",borderRadius:8,padding:"5px 14px",fontSize:13,fontWeight:700}}>📚 {data.semester}</span>}
-              </div>
-            </div>
-          </div>
-        )}
-        <div style={{background:"#fff",borderRadius:12,padding:28,boxShadow:`0 2px 10px rgba(0,0,0,0.07)`,borderTop:`4px solid ${theme.primary}`,display:"flex",flexDirection:"column",gap:20}}>
-          <div>
-            <label style={{display:"flex",alignItems:"center",gap:8,fontSize:13,fontWeight:700,color:"#0f172a",marginBottom:8}}><span style={{fontSize:20}}>📅</span> Academic Year</label>
-            <input placeholder="e.g. 2024–2025" style={{...inpStyle,width:"100%",boxSizing:"border-box",fontSize:15,fontWeight:600,border:`2px solid ${theme.border}`,borderRadius:10,padding:"12px 16px"}} value={ay} onChange={e=>setAy(e.target.value)}/>
-            <div style={{marginTop:6,fontSize:11,color:"#94a3b8"}}>Format: YYYY–YYYY (e.g. 2024–2025)</div>
-          </div>
-          <div>
-            <label style={{display:"flex",alignItems:"center",gap:8,fontSize:13,fontWeight:700,color:"#0f172a",marginBottom:10}}><span style={{fontSize:20}}>📚</span> Active Semester</label>
-            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12}}>
-              {semesterOptions.map(opt => {
-                const isActive = sem === opt.value;
-                return (
-                  <div key={opt.value} onClick={() => setSem(opt.value)} style={{cursor:"pointer",padding:"18px 20px",borderRadius:10,border:`2px solid ${isActive?opt.color:"#e2e8f0"}`,background:isActive?opt.bg:"#fafafa",display:"flex",alignItems:"center",gap:12,transition:"all 0.15s",boxShadow:isActive?`0 4px 14px ${opt.border}`:"none"}}>
-                    <span style={{fontSize:28}}>{opt.icon}</span>
-                    <div><div style={{fontWeight:700,fontSize:14,color:isActive?opt.color:"#374151"}}>{opt.value}</div><div style={{fontSize:11,color:"#94a3b8",marginTop:2}}>{opt.desc}</div></div>
-                    {isActive&&<span style={{marginLeft:"auto",background:opt.color,color:"#fff",borderRadius:20,padding:"2px 10px",fontSize:11,fontWeight:700}}>✓ Active</span>}
-                  </div>
-                );
-              })}
-            </div>
-          </div>
-          <div style={{background:"#fef9c3",border:"1px solid #fde68a",borderRadius:10,padding:"12px 16px",fontSize:13,color:"#854d0e",display:"flex",gap:10,alignItems:"flex-start"}}>
-            <span style={{fontSize:18,lineHeight:1}}>⚠️</span>
-            <span>Changing the semester updates which subjects, instructors, and assignments appear across <strong>all setup pages</strong>. Make sure to configure each semester separately.</span>
-          </div>
-          <button style={{padding:"13px 28px",background:theme.primary,color:"#fff",border:"none",borderRadius:10,cursor:"pointer",fontSize:15,fontWeight:700,display:"flex",alignItems:"center",gap:8,alignSelf:"flex-start",boxShadow:`0 4px 14px ${theme.border}`}} onClick={save}>
-            <span style={{fontSize:18}}>💾</span> Save Academic Setup
-          </button>
-        </div>
+  const generateYearOptions = () => {
+    const options = [];
+    for (let year = 2026; year < 2090; year++) {
+      const option = `${year}–${year + 1}`;
+      options.push(option);
+    }
+    return options;
+  };
+
+  const yearOptions = generateYearOptions();
+
+  const semesterOptions = [
+    { value:"1st Semester", icon:"🌱", desc:"August – December", color:"#16a34a", bg:"#dcfce7", border:"#86efac" },
+    { value:"2nd Semester", icon:"🌸", desc:"January – May",     color:"#d97706", bg:"#fef9c3", border:"#fde68a" },
+  ];
+  return (
+    <div style={{display:"flex",flexDirection:"column",gap:20,width:"100%",maxWidth:700,alignSelf:"flex-start"}}>
+      <div style={{background:theme.headerBg,borderRadius:12,padding:"20px 26px",display:"flex",alignItems:"center",gap:16,flexWrap:"wrap"}}>
+        <span style={{fontSize:36}}>🏫</span>
+        <div><div style={{color:"#fff",fontWeight:800,fontSize:18}}>Academic Setup</div><div style={{color:"rgba(255,255,255,0.65)",fontSize:12,marginTop:3}}>Configure the current Academic Year and active Semester for {theme.code}</div></div>
       </div>
-    );
-  }
-
+      {(data.academicYear || data.semester) && (
+        <div style={{background:"#fff",borderRadius:12,padding:"18px 22px",boxShadow:`0 2px 8px rgba(0,0,0,0.07)`,border:`1px solid ${theme.light2}`,display:"flex",alignItems:"center",gap:16,flexWrap:"wrap"}}>
+          <div style={{fontSize:28}}>📌</div>
+          <div>
+            <div style={{fontSize:12,fontWeight:600,color:"#64748b",marginBottom:4}}>Currently Saved</div>
+            <div style={{display:"flex",gap:8,flexWrap:"wrap",alignItems:"center"}}>
+              {data.academicYear&&<span style={{display:"inline-flex",alignItems:"center",gap:6,background:theme.light2,color:theme.text,border:`1px solid ${theme.border}`,borderRadius:8,padding:"5px 14px",fontSize:13,fontWeight:700}}>📅 A.Y. {data.academicYear}</span>}
+              {data.semester&&<span style={{display:"inline-flex",alignItems:"center",gap:6,background:"#fefce8",color:"#854d0e",border:"1px solid #fde68a",borderRadius:8,padding:"5px 14px",fontSize:13,fontWeight:700}}>📚 {data.semester}</span>}
+            </div>
+          </div>
+        </div>
+      )}
+      <div style={{background:"#fff",borderRadius:12,padding:28,boxShadow:`0 2px 10px rgba(0,0,0,0.07)`,borderTop:`4px solid ${theme.primary}`,display:"flex",flexDirection:"column",gap:20}}>
+        <div>
+          <label style={{display:"flex",alignItems:"center",gap:8,fontSize:13,fontWeight:700,color:"#0f172a",marginBottom:8}}><span style={{fontSize:20}}>📅</span> Academic Year</label>
+          <select value={ay} onChange={e=>setAy(e.target.value)} style={{width:"100%",boxSizing:"border-box",fontSize:15,fontWeight:600,border:`2px solid ${theme.border}`,borderRadius:10,padding:"12px 16px",background:"#fff",cursor:"pointer",color:"#0f172a",appearance:"none",paddingRight:40,backgroundImage:`url("data:image/svg+xml;charset=UTF-8,%3csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23374151' stroke-width='2'%3e%3cpolyline points='6 9 12 15 18 9'%3e%3c/polyline%3e%3c/svg%3e")`,backgroundRepeat:"no-repeat",backgroundPosition:"right 10px center",backgroundSize:"20px"}}>
+            <option value="" style={{color:"#94a3b8"}}>-- Select Academic Year --</option>
+            {yearOptions.map(year => (
+              <option key={year} value={year} style={{color:"#0f172a",background:"#fff"}}>{year}</option>
+            ))}
+          </select>
+        </div>
+        <div>
+          <label style={{display:"flex",alignItems:"center",gap:8,fontSize:13,fontWeight:700,color:"#0f172a",marginBottom:10}}><span style={{fontSize:20}}>📚</span> Active Semester</label>
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12}}>
+            {semesterOptions.map(opt => {
+              const isActive = sem === opt.value;
+              return (
+                <div key={opt.value} onClick={() => setSem(opt.value)} style={{cursor:"pointer",padding:"18px 20px",borderRadius:10,border:`2px solid ${isActive?opt.color:"#e2e8f0"}`,background:isActive?opt.bg:"#fafafa",display:"flex",alignItems:"center",gap:12,transition:"all 0.15s",boxShadow:isActive?`0 4px 14px ${opt.border}`:"none"}}>
+                  <span style={{fontSize:28}}>{opt.icon}</span>
+                  <div><div style={{fontWeight:700,fontSize:14,color:isActive?opt.color:"#374151"}}>{opt.value}</div><div style={{fontSize:11,color:"#94a3b8",marginTop:2}}>{opt.desc}</div></div>
+                  {isActive&&<span style={{marginLeft:"auto",background:opt.color,color:"#fff",borderRadius:20,padding:"2px 10px",fontSize:11,fontWeight:700}}>✓ Active</span>}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+        <div style={{background:"#fef9c3",border:"1px solid #fde68a",borderRadius:10,padding:"12px 16px",fontSize:13,color:"#854d0e",display:"flex",gap:10,alignItems:"flex-start"}}>
+          <span style={{fontSize:18,lineHeight:1}}>⚠️</span>
+          <span>Changing the semester updates which subjects, instructors, and assignments appear across <strong>all setup pages</strong>. Make sure to configure each semester separately.</span>
+        </div>
+        <button style={{padding:"13px 28px",background:theme.primary,color:"#fff",border:"none",borderRadius:10,cursor:"pointer",fontSize:15,fontWeight:700,display:"flex",alignItems:"center",gap:8,alignSelf:"flex-start",boxShadow:`0 4px 14px ${theme.border}`}} onClick={save}>
+          <span style={{fontSize:18}}>💾</span> Save Academic Setup
+        </button>
+      </div>
+    </div>
+  );
+}
   /* ── INSTRUCTOR LOAD ── */
   if (activePage==="Instructor Load") {
     // ── MODIFIED: check subject hour_load before saving ──

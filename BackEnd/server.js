@@ -550,15 +550,14 @@ app.put("/api/schedules/:id", isAuthenticated, async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// ── MODIFIED: only delete schedules, NOT instructors ──
 app.delete("/api/schedules", isAuthenticated, async (req, res) => {
   try {
     const deptId = getDeptId(req);
     if (deptId) {
       await pool.query(`DELETE FROM schedules WHERE department_id=$1`, [deptId]);
-      await pool.query(`DELETE FROM instructors WHERE department_id=$1`, [deptId]);
     } else {
       await pool.query(`DELETE FROM schedules`);
-      await pool.query(`DELETE FROM instructors`);
     }
     res.json({ deleted: true });
   } catch (e) { res.status(500).json({ error: e.message }); }
