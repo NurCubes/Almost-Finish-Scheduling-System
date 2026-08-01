@@ -11,7 +11,8 @@ const DAYS  = ["Monday","Tuesday","Wednesday","Thursday","Friday","Saturday","Su
 const TIMES = Array.from({ length: Math.round((DAY_END - DAY_START) / TIME_STEP) }, (_, i) => +(DAY_START + i * TIME_STEP).toFixed(1));
 const LECTURE_ROOMS = ["Room 1","Room 2","Room 3","Room 4","Room 5"];
 const LAB_ROOMS     = ["Lab A","Lab B","Lab C"];
-const ALL_ROOMS     = [...LECTURE_ROOMS, ...LAB_ROOMS];
+const TBA_ROOM      = "TBA";  // NEW
+const ALL_ROOMS     = [...LECTURE_ROOMS, ...LAB_ROOMS, TBA_ROOM];  // UPDATED
 
 const LUNCH_START   = 12;
 const LUNCH_END     = 13;
@@ -98,8 +99,11 @@ function hasGE(yearLevel, semester) {
   if (yearLevel === 3 && semester === "1st Semester") return true;
   return false;
 }
+function getRoomType(r) { 
+  if (r === "TBA") return "Lecture";  // ✅ Changed from "TBA" to "Lecture"
+  return LAB_ROOMS.includes(r) ? "Laboratory" : "Lecture"; 
+}
 
-function getRoomType(r) { return LAB_ROOMS.includes(r) ? "Laboratory" : "Lecture"; }
 function fmtH(h) {
   const hr  = Math.floor(h);
   const min = h % 1 === 0.5 ? "30" : "00";
@@ -123,35 +127,33 @@ function insertBreaks(blocks) {
     const overlapsLunch = !lunchDone && b.start < LUNCH_END && b.end > LUNCH_START;
     if (overlapsLunch) {
       if (b.start < LUNCH_START) withLunch.push({ ...b, end: LUNCH_START });
-      withLunch.push({ ...b, subject:"BREAK", room:"—", roomType:"Break", section:"", instructor:"", start:LUNCH_START, end:LUNCH_END, is_break:true });
+      // Mark lunch breaks with is_lunch: true so they don't get shifted
+      withLunch.push({ ...b, subject:"BREAK", room:"—", roomType:"Break", section:"", instructor:"", start:LUNCH_START, end:LUNCH_END, is_break:true, is_lunch: true });
       if (b.end > LUNCH_END) withLunch.push({ ...b, start: LUNCH_END });
       lunchDone = true;
     } else {
       if (!lunchDone && b.start >= LUNCH_END) {
-        withLunch.push({ ...b, subject:"BREAK", room:"—", roomType:"Break", section:"", instructor:"", start:LUNCH_START, end:LUNCH_END, is_break:true });
+        withLunch.push({ ...b, subject:"BREAK", room:"—", roomType:"Break", section:"", instructor:"", start:LUNCH_START, end:LUNCH_END, is_break:true, is_lunch: true });
         lunchDone = true;
       }
       withLunch.push(b);
     }
   }
 
-  // Step 2 — walk the day as ONE continuous timeline. Every 4 cumulative
-  // hours of class triggers a 1-hour break, and everything scheduled after
-  // that point is pushed later by the break's duration, so the remaining
-  // class time visibly continues right after the break instead of being
-  // silently dropped or left overlapping the break slot.
+  // Step 2 — walk the day as ONE continuous timeline. Every 3 cumulative
+  // hours of class triggers a 0.5-hour break.
+  // KEY FIX: Don't shift lunch breaks - only shift regular class blocks
   const result = [];
-  let cursor = null;   // current point on the *shifted* timeline
+  let cursor = null;
   let hoursSincePause = 0;
-  let shift = 0;        // cumulative time we've pushed everything after this later by
+  let shift = 0;
 
   for (const raw of withLunch) {
-    let bStart = +(raw.start + shift).toFixed(1);
-    let bEnd   = +(raw.end   + shift).toFixed(1);
+    // FIXED: Only apply shift to non-lunch breaks
+    let bStart = +(raw.start + (raw.is_lunch ? 0 : shift)).toFixed(1);
+    let bEnd   = +(raw.end   + (raw.is_lunch ? 0 : shift)).toFixed(1);
 
     if (raw.is_break) {
-      // A pre-existing break (lunch, or one already in the raw data).
-      // Shift it onto the current timeline, reset the class-hour counter.
       result.push({ ...raw, start: bStart, end: bEnd });
       cursor = bEnd;
       hoursSincePause = 0;
@@ -160,10 +162,10 @@ function insertBreaks(blocks) {
 
     if (cursor !== null) {
       if (bStart > cursor) {
-        hoursSincePause = 0; // genuine gap — fresh run of class time
+        hoursSincePause = 0;
       } else if (bStart < cursor) {
-        if (bEnd <= cursor) continue; // fully-covered duplicate — skip
-        bStart = cursor;               // trim the overlapping portion
+        if (bEnd <= cursor) continue;
+        bStart = cursor;
       }
     }
 
@@ -184,11 +186,11 @@ function insertBreaks(blocks) {
       if (hoursSincePause >= BREAK_TRIGGER) {
         const breakEnd = +(segStart + BREAK_DUR).toFixed(1);
         result.push({ ...raw, subject:"BREAK", room:"—", roomType:"Break", section:"", instructor:"", start: segStart, end: breakEnd, is_break:true });
-        shift = +(shift + BREAK_DUR).toFixed(1); // push everything after this later
+        shift = +(shift + BREAK_DUR).toFixed(1);
         segStart = breakEnd;
         hoursSincePause = 0;
       } else {
-        break; // this block is done, trigger not hit yet — move to next block
+        break;
       }
     }
     cursor = segStart;
@@ -241,9 +243,9 @@ function detectConflicts(schedules) {
       const s = fmtH(Math.max(a.start, b.start));
       const e = fmtH(Math.min(a.end,   b.end));
 
-      if (a.room && b.room && a.room === b.room) {
-        out.push({ type:"Room Conflict", day:a.day, room:a.room, detail:`"${a.room}" is double-booked on ${a.day} ${s}–${e}: ${a.instructor||a.section||"?"} (${a.subject}) vs ${b.instructor||b.section||"?"} (${b.subject})`, blockA:a, blockB:b });
-      }
+      if (a.room && b.room && a.room === b.room && a.room !== "TBA") {
+  out.push({ type:"Room Conflict", day:a.day, room:a.room, detail:`"${a.room}" is double-booked on ${a.day} ${s}–${e}: ${a.instructor||a.section||"?"} (${a.subject}) vs ${b.instructor||b.section||"?"} (${b.subject})`, blockA:a, blockB:b });
+}
       const aInst = normName(a.instructor), bInst = normName(b.instructor);
       if (aInst && bInst && aInst === bInst) {
         out.push({ type:"Instructor Conflict", day:a.day, room:a.room||"", detail:`${a.instructor} is double-booked on ${a.day} ${s}–${e}: "${a.subject}"${a.section?" ("+a.section+")":""} in ${a.room||"?"} and "${b.subject}"${b.section?" ("+b.section+")":""} in ${b.room||"?"}`, blockA:a, blockB:b });
@@ -259,16 +261,31 @@ function detectConflicts(schedules) {
   return out;
 }
 
-// ── MODIFIED: findSuggestions now branches by conflict type ──
-// If Instructor Conflict → suggest vacant instructors
-// If Room/Time/Section conflict → suggest vacant rooms (original logic)
-function findSuggestions(conflict, allSchedules, instructorPool = []) {
+
+// Add to your existing utilities file
+async function getPrefMatchScore(instructorId, semester, day, startTime, endTime) {
+  try {
+    const res = await fetch("/api/calculate-preference-match", {
+      method: "POST",
+      credentials: "include",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ instructor_id: instructorId, semester, day, time_start: startTime, time_end: endTime }),
+    });
+    const data = res.ok ? await res.json() : { score: 0 };
+    return data.score || 0;
+  } catch {
+    return 0;
+  }
+}
+
+// MODIFIED: findSuggestions — rank by preference score
+function findSuggestions(conflict, allSchedules, instructorPool = [], preferences = []) {
   const { type, blockA } = conflict;
   if (!blockA) return [];
   const { day, start, end, room } = blockA;
   const dur = end - start;
 
-  // ── Instructor Conflict: suggest a vacant instructor ──
+  // ── Instructor Conflict: suggest vacant instructors ──
   if (type === "Instructor Conflict") {
     const suggestions = [];
     for (const inst of instructorPool) {
@@ -286,6 +303,7 @@ function findSuggestions(conflict, allSchedules, instructorPool = []) {
           instructor: inst.name,
           day, start, end, room,
           icon: inst.employment_type === "Part-time" ? "⏱" : "👨‍🏫",
+          prefScore: 0, // Will be calculated client-side if needed
         });
       }
       if (suggestions.length >= 5) break;
@@ -293,8 +311,44 @@ function findSuggestions(conflict, allSchedules, instructorPool = []) {
     return suggestions;
   }
 
-  // ── Room / Section / default conflicts: suggest vacant rooms ──
+  // ── Room / Section / default conflicts: suggest vacant rooms, ranked by preference ──
   const suggestions = [];
+  
+  // Suggest same room, different time (prioritize preferred times)
+  for (let t = 7; t + dur <= 20; t++) {
+    if (t === start) continue;
+    if (t < 13 && t + dur > 12) continue; // Skip lunch
+    const blocked = allSchedules.filter(s =>
+      !s.is_break && s.day === day && s.room === room &&
+      !(s.end <= t || s.start >= t + dur)
+    );
+    if (!blocked.length) {
+      let prefMatch = 0;
+      // Check if this time matches instructor's preferences (if applicable)
+      if (blockA.instructor && preferences.length > 0) {
+        const instPrefs = preferences.filter(p => normName(p.instructor) === normName(blockA.instructor) && p.day === day);
+        for (const pref of instPrefs) {
+          if (t < pref.time_end && t + dur > pref.time_start) {
+            prefMatch = pref.priority === "primary" ? 100 : 60;
+            break;
+          }
+        }
+      }
+      
+      suggestions.push({
+        type: "time",
+        label: `Same room, ${fmtRange(t, t + dur)}`,
+        room,
+        day,
+        start: t,
+        end: t + dur,
+        icon: "🕐",
+        prefMatch,
+      });
+    }
+  }
+
+  // Suggest different room, same time (prioritize available rooms)
   ALL_ROOMS.forEach(r => {
     if (r === room) return;
     const blocked = allSchedules.filter(s =>
@@ -302,20 +356,20 @@ function findSuggestions(conflict, allSchedules, instructorPool = []) {
       !(s.end <= start || s.start >= end)
     );
     if (!blocked.length) {
-      suggestions.push({ type:"room", label:`Move to ${r}`, room: r, day, start, end, icon: LAB_ROOMS.includes(r) ? "🔬" : "📖" });
+      suggestions.push({
+        type: "room",
+        label: `Move to ${r}`,
+        room: r,
+        day,
+        start,
+        end,
+        icon: LAB_ROOMS.includes(r) ? "🔬" : "📖",
+        prefMatch: 0,
+      });
     }
   });
-  for (let t = DAY_START; t + dur <= DAY_END; t++) {
-    if (t === start) continue;
-    if (t < LUNCH_END && t + dur > LUNCH_START) continue;
-    const blocked = allSchedules.filter(s =>
-      !s.is_break && s.day === day && s.room === room &&
-      !(s.end <= t || s.start >= t + dur)
-    );
-    if (!blocked.length) {
-      suggestions.push({ type:"time", label:`Same room, ${fmtRange(t, t + dur)}`, room, day, start: t, end: t + dur, icon:"🕐" });
-    }
-  }
+
+  // Suggest different day, same room/time
   DAYS.forEach(d => {
     if (d === day) return;
     const blocked = allSchedules.filter(s =>
@@ -323,11 +377,30 @@ function findSuggestions(conflict, allSchedules, instructorPool = []) {
       !(s.end <= start || s.start >= end)
     );
     if (!blocked.length) {
-      suggestions.push({ type:"day", label:`${d}, ${room}, ${fmtRange(start, end)}`, room, day: d, start, end, icon:"📅" });
+      suggestions.push({
+        type: "day",
+        label: `${d}, ${room}, ${fmtRange(start, end)}`,
+        room,
+        day: d,
+        start,
+        end,
+        icon: "📅",
+        prefMatch: 0,
+      });
     }
   });
+
+  // Sort by prefMatch descending (preferred times first)
+  suggestions.sort((a, b) => (b.prefMatch || 0) - (a.prefMatch || 0));
+
   return suggestions.slice(0, 5);
 }
+
+
+// ── MODIFIED: findSuggestions now branches by conflict type ──
+// If Instructor Conflict → suggest vacant instructors
+// If Room/Time/Section conflict → suggest vacant rooms (original logic)
+
 function convertGrid(grid, instructor) {
   const out=[];
   DAYS.forEach(day=>{
@@ -619,32 +692,68 @@ function SubjectColorLegend({ blocks, codeMap }) {
 }
 
 // ── EDIT NAMES/TITLES HERE — shown at the bottom of every printed schedule ──
-const SIGNATORIES = {
-  notedBy:    { name: "MYLEN B. PADERES", title: "Dean SOICT" },
-  approvedBy: { name: "HEIDI A. PAMA",       title: "Academic Coordinator" },
+// ── DEPARTMENT-SPECIFIC SIGNATORIES — Edit per department ──
+const DEPT_SIGNATORIES = {
+  "BSIT": {
+    notedBy:    { name: "MYLEN B. PADERES", title: "Dean SOICT" },
+    approvedBy: { name: "HEIDI A. PAMA",    title: "Academic Coordinator" },
+  },
+  "BSCS": {
+    notedBy:    { name: "Dr. JOHN DOE",      title: "Dean of CICS" },
+    approvedBy: { name: "MS. JANE SMITH",    title: "Academic Coordinator" },
+  },
+  "BSA": {
+    notedBy:    { name: "DR. MARIA GARCIA",  title: "Dean of CAS" },
+    approvedBy: { name: "MR. LUIS SANTOS",   title: "Academic Coordinator" },
+  },
+  "BSN": {
+    notedBy:    { name: "DR. ROSA CRUZ",     title: "Dean of CHS" },
+    approvedBy: { name: "MS. ANNA FLORES",   title: "Academic Coordinator" },
+  },
+  "BSED": {
+    notedBy:    { name: "DR. ROBERT DAVIS",  title: "Dean of CED" },
+    approvedBy: { name: "MR. CARLOS REYES",  title: "Academic Coordinator" },
+  },
+  "BEED": {
+    notedBy:    { name: "DR. PATRICIA YOUNG", title: "Dean of CECEP" },
+    approvedBy: { name: "MS. SOPHIE MARTIN", title: "Academic Coordinator" },
+  },
+  "BSCpE": {
+    notedBy:    { name: "DR. MICHAEL WONG",   title: "Dean of CET" },
+    approvedBy: { name: "MR. JAMES TAYLOR",  title: "Academic Coordinator" },
+  },
+  "BSME": {
+    notedBy:    { name: "DR. ANTONIO LOPEZ",  title: "Dean of CEAT" },
+    approvedBy: { name: "MR. MIGUEL TORRES",  title: "Academic Coordinator" },
+  },
 };
 
-function SignatureBlock() {
+// Helper to get signatories for a department
+function getSignatories(deptCode) {
+  return DEPT_SIGNATORIES[deptCode] || DEPT_SIGNATORIES["BSIT"];
+}
+
+function SignatureBlock({ theme }) {
+  const sigs = getSignatories(theme?.code || "BSIT");
   return (
     <div style={{ display: "flex", justifyContent: "space-between", marginTop: 34, paddingTop: 4 }}>
       <div style={{ textAlign: "center", width: "45%" }}>
         <div style={{ fontSize: 10.5, color: "#475569", marginBottom: 26 }}>Noted by:</div>
         <div style={{ borderTop: "1px solid #000", paddingTop: 5, fontSize: 25, fontWeight: 800, textTransform: "uppercase" }}>
-          {SIGNATORIES.notedBy.name}
+          {sigs.notedBy.name}
         </div>
-        <div style={{ fontSize: 20, color: "#475569" }}>{SIGNATORIES.notedBy.title}</div>
+        <div style={{ fontSize: 20, color: "#475569" }}>{sigs.notedBy.title}</div>
       </div>
       <div style={{ textAlign: "center", width: "45%" }}>
         <div style={{ fontSize: 10.5, color: "#475569", marginBottom: 26 }}>Approved by:</div>
         <div style={{ borderTop: "1px solid #000", paddingTop: 5, fontSize: 25, fontWeight: 800, textTransform: "uppercase" }}>
-          {SIGNATORIES.approvedBy.name}
+          {sigs.approvedBy.name}
         </div>
-        <div style={{ fontSize: 20, color: "#475569" }}>{SIGNATORIES.approvedBy.title}</div>
+        <div style={{ fontSize: 20, color: "#475569" }}>{sigs.approvedBy.title}</div>
       </div>
     </div>
   );
 }
-
 
 
 
@@ -799,167 +908,493 @@ function SchoolHeader({ academicYear, semester, compact=false, theme }) {
   );
 }
 
-/* ════════ EDIT MODAL ════════ */
-function EditModal({ block, onSave, onClose, theme }) {
+function EditModal({ block, onSave, onClose, theme, allSchedules = [], instructorPool = [] }) {
   const [day,setDay]=useState(block.day);
   const [startH,setStartH]=useState(block.start);
   const [endH,setEndH]=useState(block.end);
   const [room,setRoom]=useState(block.room);
   const [saving,setSaving]=useState(false);
   const [err,setErr]=useState("");
+  const [showConflicts, setShowConflicts] = useState(false);
+  const [conflicts, setConflicts] = useState([]);
+  
   const dur=block.end-block.start;
   const inpStyle={padding:"9px 12px",border:`1px solid ${theme.border}`,borderRadius:8,fontSize:14,outline:"none",width:"100%",background:"#fff",color:"#0f172a"};
- const save=async()=>{
+  
+  const checkConflicts = () => {
+    const target = { day, start: startH, end: endH, room: room || block.room, roomType: getRoomType(room || block.room) };
+    const moved = { ...block, day, start: startH, end: endH, room: room || block.room, roomType: getRoomType(room || block.room) };
+    
+    const others = allSchedules.filter(s => !s.is_break && s.id !== block.id);
+    const combined = [...others, moved];
+    const found = detectConflicts(combined);
+    
+    const relevant = found.filter(c => 
+      (c.blockA?.id === block.id || c.blockB?.id === block.id) ||
+      (c.blockA?.day === day && c.blockA?.start === startH) ||
+      (c.blockB?.day === day && c.blockB?.start === startH)
+    );
+    
+    return relevant;
+  };
+
+  const save=async()=>{
     if(startH>=endH) return setErr("Start time must be before end time.");
     if(!room) return setErr("Please select a room.");
-    setSaving(true); setErr("");
+    
+    const foundConflicts = checkConflicts();
+    if(foundConflicts.length > 0) {
+      setConflicts(foundConflicts);
+      setShowConflicts(true);
+      return;
+    }
+    
+    setSaving(true); 
+    setErr("");
     try {
       await onSave({ day, start:startH, end:endH, room });
     } catch {setErr("Failed to save.");}
     setSaving(false);
   };
+  
   return (
-    <div style={{position:"fixed",inset:0,background:"rgba(15,23,42,0.6)",display:"flex",alignItems:"center",justifyContent:"center",zIndex:1000}} onClick={onClose}>
-      <div style={{background:"#fff",borderRadius:16,padding:28,width:"100%",maxWidth:480,display:"flex",flexDirection:"column",gap:14,boxShadow:"0 24px 64px rgba(0,0,0,0.25)"}} onClick={e=>e.stopPropagation()}>
+    // ✅ FIX: Increased z-index to 99999, added explicit width/height for viewport coverage
+    <div style={{
+      position:"fixed",
+      top: 0,
+      left: 0,
+      right: 0,
+      bottom: 0,
+      width: "100%",
+      height: "100%",
+      background:"rgba(15,23,42,0.6)",
+      display:"flex",
+      alignItems:"center",
+      justifyContent:"center",
+      zIndex: 99999
+    }} onClick={onClose}>
+      {/* ✅ FIX: Changed boxSizing to border-box */}
+      <div style={{
+        background:"#fff",
+        borderRadius:16,
+        padding:28,
+        width:"100%",
+        maxWidth:520,
+        display:"flex",
+        flexDirection:"column",
+        gap:14,
+        boxSizing: "border-box",
+        boxShadow:"0 24px 64px rgba(0,0,0,0.25)"
+      }} onClick={e=>e.stopPropagation()}>
         <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",borderBottom:`1px solid ${theme.light2}`,paddingBottom:12}}>
           <div><div style={{fontSize:16,fontWeight:700}}>✏ Edit Schedule Block</div><div style={{fontSize:12,color:"#64748b",marginTop:2}}>Adjust day, time, or room</div></div>
           <button onClick={onClose} style={{background:theme.light,border:"none",borderRadius:8,width:32,height:32,cursor:"pointer",fontSize:16,color:theme.primary}}>✕</button>
         </div>
+        
+        {showConflicts && conflicts.length > 0 && (
+          <div style={{background:"#fee2e2",border:"1px solid #fca5a5",borderRadius:8,padding:"12px 14px"}}>
+            <div style={{fontSize:13,fontWeight:700,color:"#dc2626",marginBottom:8}}>⚠ {conflicts.length} Conflict{conflicts.length!==1?"s":""} Found</div>
+            {conflicts.map((c, i) => (
+              <div key={i} style={{fontSize:12,color:"#991b1b",marginBottom:6,paddingLeft:8,borderLeft:`3px solid #dc2626`}}>
+                <strong>{c.type}:</strong> {c.detail}
+              </div>
+            ))}
+            <button 
+              onClick={() => setShowConflicts(false)} 
+              style={{marginTop:8,padding:"6px 12px",background:"#ffffff",border:"1px solid #fca5a5",borderRadius:6,cursor:"pointer",fontSize:11,fontWeight:600,color:"#dc2626"}}
+            >
+              ← Back to Editing
+            </button>
+          </div>
+        )}
+        
         {err&&<div style={{background:"#fee2e2",color:"#dc2626",border:"1px solid #fca5a5",borderRadius:8,padding:"10px 14px",fontSize:13}}>⚠ {err}</div>}
-        <div style={{display:"flex",flexDirection:"column",gap:6}}>
-          <label style={{fontSize:12,fontWeight:600,color:"#374151"}}>Day</label>
-          <select style={inpStyle} value={day} onChange={e=>setDay(e.target.value)}>{DAYS.map(d=><option key={d} value={d}>{d}</option>)}</select>
-        </div>
-        <div style={{display:"flex",gap:12}}>
-          <div style={{flex:1,display:"flex",flexDirection:"column",gap:6}}>
-            <label style={{fontSize:12,fontWeight:600,color:"#374151"}}>Start</label>
-            <select style={inpStyle} value={startH} onChange={e=>{const s=Number(e.target.value);setStartH(s);setEndH(s+dur);}}>{TIMES.map(t=><option key={t} value={t}>{fmtH(t)}</option>)}</select>
-          </div>
-          <div style={{flex:1,display:"flex",flexDirection:"column",gap:6}}>
-            <label style={{fontSize:12,fontWeight:600,color:"#374151"}}>End</label>
-            <select style={inpStyle} value={endH} onChange={e=>setEndH(Number(e.target.value))}>{TIMES.filter(t=>t>startH).concat([DAY_END]).map(t=><option key={t} value={t}>{fmtH(t)}</option>)}</select>
-          </div>
-        </div>
-        <div style={{display:"flex",flexDirection:"column",gap:6}}>
-          <label style={{fontSize:12,fontWeight:600,color:"#374151"}}>Room</label>
-          <select style={inpStyle} value={room} onChange={e=>setRoom(e.target.value)}>
-            <option value="">— Select Room —</option>
-            <optgroup label="Lecture Rooms">{LECTURE_ROOMS.map(r=><option key={r} value={r}>{r}</option>)}</optgroup>
-            <optgroup label="Laboratories">{LAB_ROOMS.map(r=><option key={r} value={r}>{r}</option>)}</optgroup>
-          </select>
-        </div>
-        <div style={{display:"flex",gap:10,paddingTop:4,borderTop:"1px solid #f1f5f9"}}>
-          <button style={{flex:1,padding:"11px",background:theme.primary,color:"#fff",border:"none",borderRadius:8,cursor:"pointer",fontSize:14,fontWeight:600}} onClick={save} disabled={saving}>{saving?"Saving…":"✓ Save Changes"}</button>
-          <button style={{padding:"11px 20px",background:theme.light,color:theme.text,border:`1px solid ${theme.border}`,borderRadius:8,cursor:"pointer",fontSize:14}} onClick={onClose}>Cancel</button>
-        </div>
+        
+        {!showConflicts && (
+          <>
+            <div style={{display:"flex",flexDirection:"column",gap:6}}>
+              <label style={{fontSize:12,fontWeight:600,color:"#374151"}}>Day</label>
+              <select style={inpStyle} value={day} onChange={e=>setDay(e.target.value)}>{DAYS.map(d=><option key={d} value={d}>{d}</option>)}</select>
+            </div>
+            <div style={{display:"flex",gap:12}}>
+              <div style={{flex:1,display:"flex",flexDirection:"column",gap:6}}>
+                <label style={{fontSize:12,fontWeight:600,color:"#374151"}}>Start</label>
+                <select style={inpStyle} value={startH} onChange={e=>{const s=Number(e.target.value);setStartH(s);setEndH(s+dur);}}>{TIMES.map(t=><option key={t} value={t}>{fmtH(t)}</option>)}</select>
+              </div>
+              <div style={{flex:1,display:"flex",flexDirection:"column",gap:6}}>
+                <label style={{fontSize:12,fontWeight:600,color:"#374151"}}>End</label>
+                <select style={inpStyle} value={endH} onChange={e=>setEndH(Number(e.target.value))}>{TIMES.filter(t=>t>startH).concat([DAY_END]).map(t=><option key={t} value={t}>{fmtH(t)}</option>)}</select>
+              </div>
+            </div>
+            <div style={{display:"flex",flexDirection:"column",gap:6}}>
+              <label style={{fontSize:12,fontWeight:600,color:"#374151"}}>Room</label>
+              <select style={inpStyle} value={room} onChange={e=>setRoom(e.target.value)}>
+                <option value="">— Select Room —</option>
+                <option value="TBA" style={{fontWeight:700,color:"#d97706"}}>📌 TBA (To Be Arranged)</option>
+                <optgroup label="Lecture Rooms">{LECTURE_ROOMS.map(r=><option key={r} value={r}>{r}</option>)}</optgroup>
+                <optgroup label="Laboratories">{LAB_ROOMS.map(r=><option key={r} value={r}>{r}</option>)}</optgroup>
+              </select>
+            </div>
+            <div style={{display:"flex",gap:10,paddingTop:4,borderTop:"1px solid #f1f5f9"}}>
+              <button style={{flex:1,padding:"11px",background:theme.primary,color:"#fff",border:"none",borderRadius:8,cursor:"pointer",fontSize:14,fontWeight:600}} onClick={save} disabled={saving}>{saving?"Saving…":"✓ Save Changes"}</button>
+              <button style={{padding:"11px 20px",background:theme.light,color:theme.text,border:`1px solid ${theme.border}`,borderRadius:8,cursor:"pointer",fontSize:14}} onClick={onClose}>Cancel</button>
+            </div>
+          </>
+        )}
       </div>
     </div>
   );
 }
 
-/* ════════ HOURS SUMMARY ════════ */
-function HoursSummary({ schedules, theme }) {
-  const real = schedules.filter(c=>!c.is_break);
-  const total = real.reduce((s,c)=>s+(c.end-c.start),0);
-  const labH  = real.filter(c=>c.roomType==="Laboratory").reduce((s,c)=>s+(c.end-c.start),0);
-  const lecH  = real.filter(c=>c.roomType==="Lecture").reduce((s,c)=>s+(c.end-c.start),0);
-  const labN  = real.filter(c=>c.roomType==="Laboratory").length;
-  const lecN  = real.filter(c=>c.roomType==="Lecture").length;
+
+/* ════════ WEEKLY GRID — INSTRUCTOR LOAD ════════
+   NOW WITH PREFERENCE SUPPORT
+   ════════════════════════════════════════════════ */
+function WeeklyGrid({ grid, setGrid, theme, preferences = [], occupancy = [] }) {
+  const upd = (day, t, field, val) => {
+    setGrid(prev => {
+      const ex = prev[day]?.[t] || { subject: "", room: "", roomType: "Lecture", section: "" };
+      let u = { ...ex, [field]: val };
+      if (field === "subject" && !val) u = { subject: "", room: "", roomType: "Lecture", section: "" };
+      if (field === "room" && val) u.roomType = getRoomType(val);
+      return { ...prev, [day]: { ...prev[day], [t]: u } };
+    });
+  };
+
+  // Get preference color for a time slot
+  const getPreferenceColor = (day, t) => {
+    if (!preferences || preferences.length === 0) return "transparent";
+    
+    const timeEnd = +(t + TIME_STEP).toFixed(1);
+    for (const pref of preferences) {
+      if (pref.day === day && t < pref.time_end && timeEnd > pref.time_start) {
+        return pref.priority === "primary" ? "#ecfdf5" : "#fffbeb";
+      }
+    }
+    return "#f8fafc";
+  };
+
+  const thStyle = {
+    padding: "9px 10px",
+    background: theme.primary,
+    border: `1px solid ${theme.primary3}`,
+    textAlign: "left",
+    fontWeight: 600,
+    color: "#fff",
+    whiteSpace: "nowrap",
+    minWidth: 185,
+  };
+
   return (
-    <div style={{display:"flex",gap:6,flexWrap:"wrap",alignItems:"center"}}>
-      <span style={{padding:"4px 12px",borderRadius:20,fontSize:11,fontWeight:600,background:theme.light2,color:theme.text,border:`1px solid ${theme.border}`}}>⏱ {total} total hr{total!==1?"s":""}</span>
-      <span style={{padding:"4px 12px",borderRadius:20,fontSize:11,fontWeight:600,background:"#dcfce7",color:"#166534",border:"1px solid #86efac"}}>📖 Lecture: {lecH}h ({lecN})</span>
-      <span style={{padding:"4px 12px",borderRadius:20,fontSize:11,fontWeight:600,background:theme.light2,color:theme.text,border:`1px solid ${theme.border}`}}>🔬 Lab: {labH}h ({labN})</span>
+    <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+      {/* Preference Summary Banner */}
+      {preferences && preferences.length > 0 && (
+        <div style={{
+          display: "flex",
+          gap: 12,
+          flexWrap: "wrap",
+          marginBottom: 12,
+          padding: "12px 16px",
+          background: theme.light2,
+          borderRadius: 8,
+          border: `1px solid ${theme.border}`,
+        }}>
+          <div style={{ fontSize: 12, fontWeight: 700, color: theme.text }}>
+            ⏰ Your Preference Windows:
+          </div>
+
+          {preferences
+            .filter(p => p.priority === "primary")
+            .map(p => {
+              const occ = occupancy.find(o => o.prefId === p.id);
+              return (
+                <span
+                  key={`${p.day}-${p.id}-primary`}
+                  style={{
+                    padding: "3px 12px",
+                    borderRadius: 20,
+                    fontSize: 11,
+                    fontWeight: 600,
+                    background: occ?.percentage >= 80 ? "#fee2e2" : occ?.percentage >= 50 ? "#fef9c3" : "#dcfce7",
+                    color: occ?.percentage >= 80 ? "#dc2626" : occ?.percentage >= 50 ? "#854d0e" : "#166534",
+                    border:
+                      occ?.percentage >= 80
+                        ? "1px solid #fca5a5"
+                        : occ?.percentage >= 50
+                        ? "1px solid #fde68a"
+                        : "1px solid #86efac",
+                    whiteSpace: "nowrap",
+                  }}
+                >
+                  🎯 {p.day} {fmtH(p.time_start)}–{fmtH(p.time_end)}: {occ?.percentage || 0}% ({occ?.occupiedCount || 0}/{occ?.totalSlots || 0})
+                </span>
+              );
+            })}
+
+          {preferences
+            .filter(p => p.priority === "secondary")
+            .map(p => {
+              const occ = occupancy.find(o => o.prefId === p.id);
+              return (
+                <span
+                  key={`${p.day}-${p.id}-secondary`}
+                  style={{
+                    padding: "3px 12px",
+                    borderRadius: 20,
+                    fontSize: 11,
+                    fontWeight: 600,
+                    background: "#f1f5f9",
+                    color: "#64748b",
+                    border: "1px solid #cbd5e1",
+                    whiteSpace: "nowrap",
+                  }}
+                >
+                  📋 {p.day} {fmtH(p.time_start)}–{fmtH(p.time_end)}: {occ?.percentage || 0}%
+                </span>
+              );
+            })}
+        </div>
+      )}
+
+      {/* Legend */}
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap", fontSize: 11, fontWeight: 600, padding: "8px 12px", background: theme.light2, borderRadius: 6, border: `1px solid ${theme.border}` }}>
+        <span style={{ display: "flex", alignItems: "center", gap: 6 }}>
+          <span style={{ display: "inline-block", width: 20, height: 12, background: "#1b8f59", border: "1px solid #86efac" }}></span>
+          🎯 Primary Preference
+        </span>
+        <span style={{ display: "flex", alignItems: "center", gap: 6 }}>
+          <span style={{ display: "inline-block", width: 20, height: 12, background: "#c2a11e", border: "1px solid #fde68a" }}></span>
+          📋 Secondary Preference
+        </span>
+        <span style={{ display: "flex", alignItems: "center", gap: 6 }}>
+          <span style={{ display: "inline-block", width: 20, height: 12, background: "#f8fafc", border: "1px solid #cbd5e1" }}></span>
+          ⚪ Outside Preferences
+        </span>
+      </div>
+
+      {/* Grid Table */}
+      <div style={{ overflowX: "auto" }}>
+        <table style={{ borderCollapse: "collapse", width: "100%", fontSize: 13 }}>
+          <thead>
+            <tr>
+              <th style={{ ...thStyle, minWidth: "auto" }}>Time</th>
+              {DAYS.map(d => (
+                <th key={d} style={thStyle}>
+                  {d}
+                </th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {TIMES.map(t => (
+              <tr key={t}>
+                <td
+                  style={{
+                    padding: "4px 6px",
+                    border: `1px solid ${theme.light2}`,
+                    whiteSpace: "nowrap",
+                    fontWeight: 600,
+                    fontSize: 11,
+                    color: theme.primary,
+                    paddingRight: 10,
+                    background: theme.light,
+                  }}
+                >
+                  {fmtRange(t, t + TIME_STEP)}
+                </td>
+
+                {DAYS.map(day => {
+                  const cell = grid[day]?.[t] || {};
+                  const sub = cell.subject || "";
+                  const room = cell.room || "";
+                  const rt = cell.roomType || "Lecture";
+                  const sec = cell.section || "";
+                  const lab = rt === "Laboratory";
+                  const prefColor = getPreferenceColor(day, t);
+
+                  return (
+                    <td
+                      key={day}
+                      style={{
+                        padding: "5px 6px",
+                        border: `1px solid ${theme.light2}`,
+                        verticalAlign: "top",
+                        background: sub ? (lab ? theme.light2 : theme.light) : prefColor,
+                        transition: "background-color 0.15s",
+                      }}
+                    >
+                      <input
+                        style={{
+                          width: "100%",
+                          padding: "5px 7px",
+                          border: `1px solid ${theme.border}`,
+                          borderRadius: 4,
+                          fontSize: 12,
+                          minWidth: 100,
+                          marginBottom: 4,
+                          boxSizing: "border-box",
+                        }}
+                        value={sub}
+                        placeholder="Subject"
+                        onChange={e => upd(day, t, "subject", e.target.value)}
+                      />
+                      <input
+                        style={{
+                          width: "100%",
+                          padding: "5px 7px",
+                          border: `1px solid ${theme.border}`,
+                          borderRadius: 4,
+                          fontSize: 11,
+                          marginBottom: 4,
+                          boxSizing: "border-box",
+                          background: sub ? "#fff" : theme.light,
+                          opacity: sub ? 1 : 0.4,
+                          color: theme.primary,
+                          fontWeight: 600,
+                        }}
+                        value={sec}
+                        placeholder={`${theme.code} Section`}
+                        disabled={!sub}
+                        onChange={e => upd(day, t, "section", e.target.value)}
+                      />
+                      <select
+                        style={{
+                          width: "100%",
+                          padding: "4px 6px",
+                          border: `1px solid ${theme.border}`,
+                          borderRadius: 4,
+                          fontSize: 11,
+                          fontWeight: 600,
+                          boxSizing: "border-box",
+                          background: sub ? "#fff" : theme.light,
+                          color: sub ? "#0f172a" : "#94a3b8",
+                          opacity: sub ? 1 : 0.35,
+                          cursor: sub ? "pointer" : "not-allowed",
+                        }}
+                        value={room}
+                        disabled={!sub}
+                        onChange={e => upd(day, t, "room", e.target.value)}
+                      >
+                        <option value="">— Select Room —</option>
+                        <optgroup label="Lecture Rooms">
+                          {LECTURE_ROOMS.map(r => (
+                            <option key={r} value={r}>
+                              {r}
+                            </option>
+                          ))}
+                        </optgroup>
+                        <optgroup label="Laboratories">
+                          {LAB_ROOMS.map(r => (
+                            <option key={r} value={r}>
+                              {r}
+                            </option>
+                          ))}
+                        </optgroup>
+                      </select>
+
+                      {sub && room && (
+                        <div
+                          style={{
+                            fontSize: 10,
+                            fontWeight: 700,
+                            color: lab ? theme.text : "#166534",
+                            background: lab ? theme.light2 : "#dcfce7",
+                            border: `1px solid ${lab ? theme.border : "#86efac"}`,
+                            borderRadius: 20,
+                            padding: "2px 7px",
+                            display: "inline-block",
+                            marginTop: 2,
+                          }}
+                        >
+                          {lab ? "🔬" : "📖"} {rt}
+                        </div>
+                      )}
+
+                      {sub &&
+                        room &&
+                        isRunStart(grid, day, t, sub) &&
+                        (() => {
+                          const runLen = getRunLength(grid, day, t, {
+                            subject: sub,
+                            room,
+                            roomType: rt,
+                            section: sec,
+                          });
+                          const curDuration = +(runLen * TIME_STEP).toFixed(1);
+                          return (
+                            <select
+                              style={{
+                                width: "100%",
+                                marginTop: 4,
+                                padding: "3px 6px",
+                                border: `1px solid ${theme.border}`,
+                                borderRadius: 4,
+                                fontSize: 10,
+                                fontWeight: 600,
+                                color: theme.primary,
+                                background: "#160861",
+                                boxSizing: "border-box",
+                              }}
+                              value={curDuration}
+                              onChange={e => {
+                                const newDuration = Number(e.target.value);
+                                const oldSteps = runLen;
+                                const newSteps = Math.round(newDuration / TIME_STEP);
+                                if (newSteps < oldSteps) {
+                                  trimRun(setGrid, day, t, oldSteps, newSteps);
+                                } else if (newSteps > oldSteps) {
+                                  const err = applyBlockDuration(
+                                    setGrid,
+                                    day,
+                                    t,
+                                    newDuration,
+                                    { subject: sub, room, roomType: rt, section: sec }
+                                  );
+                                  if (err) alert(err);
+                                }
+                              }}
+                            >
+                              {DURATIONS.map(d => (
+                                <option key={d} value={d}>
+                                  {d}h
+                                </option>
+                              ))}
+                            </select>
+                          );
+                        })()}
+                    </td>
+                  );
+                })}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
     </div>
   );
 }
 
-/* ════════ WEEKLY GRID ════════ */
-function WeeklyGrid({ grid, setGrid, theme }) {
-  const upd=(day,t,field,val)=>{
-    setGrid(prev=>{
-      const ex=prev[day]?.[t]||{subject:"",room:"",roomType:"Lecture",section:""};
-      let u={...ex,[field]:val};
-      if(field==="subject"&&!val) u={subject:"",room:"",roomType:"Lecture",section:""};
-      if(field==="room"&&val) u.roomType=getRoomType(val);
-      return{...prev,[day]:{...prev[day],[t]:u}};
-    });
-  };
-  const thStyle={padding:"9px 10px",background:theme.primary,border:`1px solid ${theme.primary3}`,textAlign:"left",fontWeight:600,color:"#fff",whiteSpace:"nowrap",minWidth:185};
-  return (
-    <div style={{overflowX:"auto"}}>
-      <table style={{borderCollapse:"collapse",width:"100%",fontSize:13}}>
-        <thead><tr>
-          <th style={{...thStyle,minWidth:"auto"}}>Time</th>
-          {DAYS.map(d=><th key={d} style={thStyle}>{d}</th>)}
-        </tr></thead>
-        <tbody>{TIMES.map(t=>(
-          <tr key={t}>
-            <td style={{padding:"4px 6px",border:`1px solid ${theme.light2}`,whiteSpace:"nowrap",fontWeight:600,fontSize:11,color:theme.primary,paddingRight:10,background:theme.light}}>{fmtRange(t,t+TIME_STEP)}</td>
-            {DAYS.map(day=>{
-              const cell=grid[day]?.[t]||{};
-              const sub=cell.subject||"",room=cell.room||"",rt=cell.roomType||"Lecture",sec=cell.section||"";
-              const lab=rt==="Laboratory";
-              return (
-                <td key={day} style={{padding:"5px 6px",border:`1px solid ${theme.light2}`,verticalAlign:"top",background:sub?(lab?theme.light2:theme.light):"transparent"}}>
-                  <input style={{width:"100%",padding:"5px 7px",border:`1px solid ${theme.border}`,borderRadius:4,fontSize:12,minWidth:100,marginBottom:4,boxSizing:"border-box"}} value={sub} placeholder="Subject" onChange={e=>upd(day,t,"subject",e.target.value)}/>
-                  <input style={{width:"100%",padding:"5px 7px",border:`1px solid ${theme.border}`,borderRadius:4,fontSize:11,marginBottom:4,boxSizing:"border-box",background:sub?"#fff":theme.light,opacity:sub?1:0.4,color:theme.primary,fontWeight:600}} value={sec} placeholder={`${theme.code} Section`} disabled={!sub} onChange={e=>upd(day,t,"section",e.target.value)}/>
-                  <select style={{width:"100%",padding:"4px 6px",border:`1px solid ${theme.border}`,borderRadius:4,fontSize:11,fontWeight:600,boxSizing:"border-box",background:sub?"#fff":theme.light,color:sub?"#0f172a":"#94a3b8",opacity:sub?1:0.35,cursor:sub?"pointer":"not-allowed"}} value={room} disabled={!sub} onChange={e=>upd(day,t,"room",e.target.value)}>
-                    <option value="">— Select Room —</option>
-                    <optgroup label="Lecture Rooms">{LECTURE_ROOMS.map(r=><option key={r} value={r}>{r}</option>)}</optgroup>
-                    <optgroup label="Laboratories">{LAB_ROOMS.map(r=><option key={r} value={r}>{r}</option>)}</optgroup>
-                  </select>
-                 {sub&&room&&<div style={{fontSize:10,fontWeight:700,color:lab?theme.text:"#166534",background:lab?theme.light2:"#dcfce7",border:`1px solid ${lab?theme.border:"#86efac"}`,borderRadius:20,padding:"2px 7px",display:"inline-block",marginTop:2}}>{lab?"🔬":"📖"} {rt}</div>}
-{sub && room && isRunStart(grid, day, t, sub) && (() => {
-  const runLen = getRunLength(grid, day, t, { subject: sub, room, roomType: rt, section: sec });
-  const curDuration = +(runLen * TIME_STEP).toFixed(1);
-  return (
-    <select
-      style={{width:"100%",marginTop:4,padding:"3px 6px",border:`1px solid ${theme.border}`,borderRadius:4,fontSize:10,fontWeight:600,color:theme.primary,background:"#fff",boxSizing:"border-box"}}
-      value={curDuration}
-      onChange={e => {
-        const newDuration = Number(e.target.value);
-        const oldSteps = runLen;
-        const newSteps = Math.round(newDuration / TIME_STEP);
-        if (newSteps < oldSteps) {
-          trimRun(setGrid, day, t, oldSteps, newSteps);
-        } else if (newSteps > oldSteps) {
-          const err = applyBlockDuration(setGrid, day, t, newDuration, { subject: sub, room, roomType: rt, section: sec });
-          if (err) alert(err);
-        }
-      }}
-    >
-      {DURATIONS.map(d => <option key={d} value={d}>{d}h</option>)}
-    </select>
-  );
-})()}
-                </td>
-              );
-            })}
-          </tr>
-        ))}</tbody>
-      </table>
-    </div>
-  );
-}
 
 /* ════════════════════════════════════════════════════════════
    STUDENT WEEKLY GRID
    ════════════════════════════════════════════════════════════ */
-function StudentWeeklyGrid({ grid, setGrid, theme, activeSemester }) {
+function StudentWeeklyGrid({ grid, setGrid, theme, activeSemester, selectedSection }) {
   const [instructorList, setInstructorList] = useState([]);
   const [assignedSubjects, setAssignedSubjects] = useState({});
+  const [preferences, setPreferences] = useState([]);
+  const [loadingPrefs, setLoadingPrefs] = useState(false);
 
   useEffect(() => {
     if (!theme?.code) return;
-    fetch(`/api/instructor-pool?dept=${theme.code}&semester=${encodeURIComponent(activeSemester || "")}`, { credentials:"include" })
+    fetch(`/api/instructor-pool?dept=${theme.code}&semester=${encodeURIComponent(activeSemester || "")}`, { credentials: "include" })
       .then(r => r.ok ? r.json() : [])
       .then(list => {
         if (!Array.isArray(list)) { setInstructorList([]); return; }
         setInstructorList(list.filter(i => i.name));
       })
       .catch(() => setInstructorList([]));
-    fetch(`/api/instructor-assignments?semester=${encodeURIComponent(activeSemester || "")}`, { credentials:"include" })
+
+    fetch(`/api/instructor-assignments?semester=${encodeURIComponent(activeSemester || "")}`, { credentials: "include" })
       .then(r => r.ok ? r.json() : [])
       .then(allAssignments => {
         if (!Array.isArray(allAssignments)) return;
@@ -974,11 +1409,31 @@ function StudentWeeklyGrid({ grid, setGrid, theme, activeSemester }) {
       .catch(() => {});
   }, [theme.code, activeSemester]);
 
+  // Load preferences for all instructors in this section
+  useEffect(() => {
+    if (!selectedSection || !activeSemester) {
+      setPreferences([]);
+      return;
+    }
+
+    setLoadingPrefs(true);
+    Promise.all(
+      instructorList.map(inst =>
+        fetch(`/api/instructor-preferences?instructor_id=${inst.id}&semester=${encodeURIComponent(activeSemester)}`, { credentials: "include" })
+          .then(r => r.ok ? r.json() : [])
+          .catch(() => [])
+      )
+    ).then(results => {
+      const allPrefs = results.flat();
+      setPreferences(Array.isArray(allPrefs) ? allPrefs : []);
+    }).finally(() => setLoadingPrefs(false));
+  }, [selectedSection, activeSemester, instructorList.length]);
+
   const upd = (day, t, field, val) => {
     setGrid(prev => {
-      const ex = prev[day]?.[t] || { subject:"", room:"", roomType:"Lecture", instructor:"" };
+      const ex = prev[day]?.[t] || { subject: "", room: "", roomType: "Lecture", instructor: "" };
       let u = { ...ex, [field]: val };
-      if (field === "subject" && !val) u = { ...u, subject:"", room:"", roomType:"Lecture" };
+      if (field === "subject" && !val) u = { ...u, subject: "", room: "", roomType: "Lecture" };
       if (field === "room" && val) u.roomType = getRoomType(val);
       if (field === "instructor") { u.subject = ""; }
       return { ...prev, [day]: { ...prev[day], [t]: u } };
@@ -998,87 +1453,323 @@ function StudentWeeklyGrid({ grid, setGrid, theme, activeSemester }) {
     </select>
   );
 
+  const thStyle = {
+    padding: "9px 10px",
+    background: theme.primary,
+    border: `1px solid ${theme.primary3}`,
+    textAlign: "left",
+    fontWeight: 600,
+    color: "#fff",
+    whiteSpace: "nowrap",
+    minWidth: 200,
+  };
+
+  const inpStyle = {
+    padding: "4px 6px",
+    border: `1px solid ${theme.border}`,
+    borderRadius: 4,
+    fontSize: 11,
+    boxSizing: "border-box",
+    marginBottom: 4,
+  };
+
+  // Get preference color for a time slot based on selected instructor
+  const getPreferenceColor = (day, t, instructor) => {
+    if (!instructor || preferences.length === 0) return "transparent";
+    
+    const timeEnd = +(t + TIME_STEP).toFixed(1);
+    const instPrefs = preferences.filter(p => 
+      p.instructor_id === instructorList.find(i => i.name === instructor)?.id
+    );
+    
+    for (const pref of instPrefs) {
+      if (pref.day === day && t < pref.time_end && timeEnd > pref.time_start) {
+        return pref.priority === "primary" ? "#ecfdf5" : "#fffbeb";
+      }
+    }
+    
+    return "transparent";
+  };
+
   return (
-    <div style={{overflowX:"auto"}}>
-      <table style={{borderCollapse:"collapse",width:"100%",fontSize:13}}>
-        <thead><tr>
-          <th style={{padding:"9px 10px",background:theme.primary,border:`1px solid ${theme.primary3}`,textAlign:"left",fontWeight:600,color:"#fff",whiteSpace:"nowrap"}}>Time</th>
-          {DAYS.map(d=><th key={d} style={{padding:"9px 10px",background:theme.primary,border:`1px solid ${theme.primary3}`,textAlign:"left",fontWeight:600,color:"#fff",minWidth:200}}>{d}</th>)}
-        </tr></thead>
-       <tbody>{TIMES.map(t=>(
-          <tr key={t}>
-            <td style={{padding:"4px 6px",border:`1px solid ${theme.light2}`,whiteSpace:"nowrap",fontWeight:600,fontSize:11,color:theme.primary,background:theme.light}}>{fmtRange(t,t+TIME_STEP)}</td>
-            {DAYS.map(day=>{
-              const cell = grid[day]?.[t] || {};
-              const sub  = cell.subject || "", room = cell.room || "", rt = cell.roomType || "Lecture", inst = cell.instructor || "";
-              const lab  = rt === "Laboratory";
-              const instKey  = normName(inst);
-              const subsList = assignedSubjects[instKey] || [];
-              const geSubjects    = subsList.filter(s => s.subject_type === "GE");
-              const majorSubjects = subsList.filter(s => s.subject_type === "Major");
-              return (
-                <td key={day} style={{padding:"5px 6px",border:`1px solid ${theme.light2}`,verticalAlign:"top",background:sub?(lab?theme.light2:theme.light):"transparent"}}>
-                 {assignedInstructorList.length > 0
-                    ? <InstructorSelect value={inst} onChange={e => upd(day, t, "instructor", e.target.value)} style={{width:"100%",padding:"4px 6px",border:`1px solid ${theme.border}`,borderRadius:4,fontSize:11,fontWeight:600,boxSizing:"border-box",marginBottom:4,color:inst?theme.primary:"#94a3b8",background:"#fff"}}/>
-                    : <input style={{width:"100%",padding:"5px 7px",border:`1px solid ${theme.border}`,borderRadius:4,fontSize:11,color:theme.primary,fontWeight:600,marginBottom:4,boxSizing:"border-box"}} value={inst} placeholder="Instructor" onChange={e => upd(day, t, "instructor", e.target.value)}/>
-                  }
-                  {inst && subsList.length > 0
-                    ? <select style={{width:"100%",padding:"4px 6px",border:`1px solid ${theme.border}`,borderRadius:4,fontSize:11,boxSizing:"border-box",marginBottom:4,color:sub?"#0f172a":"#94a3b8",background:"#fff"}} value={sub} onChange={e => upd(day, t, "subject", e.target.value)}>
-                        <option value="">— Subject —</option>
-                        {geSubjects.length > 0 && (
-                          <optgroup label="🌐 GE Subjects">
-                            {geSubjects.map(s => <option key={s.subject_name} value={s.subject_name}>{s.subject_name}</option>)}
-                          </optgroup>
-                        )}
-                        {majorSubjects.length > 0 && (
-                          <optgroup label="🎯 Major Subjects">
-                            {majorSubjects.map(s => <option key={s.subject_name} value={s.subject_name}>{s.subject_name}</option>)}
-                          </optgroup>
-                        )}
-                      </select>
-                    : inst && subsList.length === 0
-                      ? <div style={{fontSize:11,color:"#ef4444",padding:"4px 6px",marginBottom:4,background:"#fff0f0",borderRadius:4,border:"1px solid #fca5a5"}}>⚠ No subjects assigned for {activeSemester}</div>
-                      : <input style={{width:"100%",padding:"5px 7px",border:`1px solid ${theme.border}`,borderRadius:4,fontSize:12,marginBottom:4,boxSizing:"border-box",opacity:inst?1:0.4}} value={sub} placeholder={inst?"Subject":"Select instructor first"} disabled={!inst} onChange={e => upd(day, t, "subject", e.target.value)}/>
-                  }
-                  <select style={{width:"100%",padding:"4px 6px",border:`1px solid ${theme.border}`,borderRadius:4,fontSize:11,fontWeight:600,boxSizing:"border-box",background:sub?"#fff":theme.light,color:sub?"#0f172a":"#94a3b8",opacity:sub?1:0.35,cursor:sub?"pointer":"not-allowed"}} value={room} disabled={!sub} onChange={e => upd(day, t, "room", e.target.value)}>
-                    <option value="">— Select Room —</option>
-                    <optgroup label="Lecture Rooms">{LECTURE_ROOMS.map(r=><option key={r} value={r}>{r}</option>)}</optgroup>
-                    <optgroup label="Laboratories">{LAB_ROOMS.map(r=><option key={r} value={r}>{r}</option>)}</optgroup>
-                  </select>
-                 {sub&&room&&<div style={{fontSize:10,fontWeight:700,color:lab?theme.text:"#166534",background:lab?theme.light2:"#dcfce7",border:`1px solid ${lab?theme.border:"#86efac"}`,borderRadius:20,padding:"2px 7px",display:"inline-block",marginTop:2}}>{lab?"🔬":"📖"} {rt}</div>}
-{sub && room && isRunStart(grid, day, t, sub) && (() => {
-  const matchFields = { subject: sub, room, roomType: rt, section: "", instructor: inst };
-  const runLen = getRunLength(grid, day, t, matchFields);
-  const curDuration = +(runLen * TIME_STEP).toFixed(1);
-  return (
-    <select
-      style={{width:"100%",marginTop:4,padding:"3px 6px",border:`1px solid ${theme.border}`,borderRadius:4,fontSize:10,fontWeight:600,color:theme.primary,background:"#fff",boxSizing:"border-box"}}
-      value={curDuration}
-      onChange={e => {
-        const newDuration = Number(e.target.value);
-        const oldSteps = runLen;
-        const newSteps = Math.round(newDuration / TIME_STEP);
-        if (newSteps < oldSteps) {
-          trimRun(setGrid, day, t, oldSteps, newSteps);
-        } else if (newSteps > oldSteps) {
-          const err = applyBlockDuration(setGrid, day, t, newDuration, { subject: sub, room, roomType: rt, instructor: inst });
-          if (err) alert(err);
-        }
-      }}
-    >
-      {DURATIONS.map(d => <option key={d} value={d}>{d}h</option>)}
-    </select>
-  );
-})()}
+    <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+      {/* Legend */}
+      <div style={{
+        display: "flex",
+        gap: 8,
+        flexWrap: "wrap",
+        fontSize: 11,
+        fontWeight: 600,
+        padding: "8px 12px",
+        background: theme.light2,
+        borderRadius: 6,
+        border: `1px solid ${theme.border}`,
+      }}>
+        <span style={{ display: "flex", alignItems: "center", gap: 6 }}>
+          <span style={{ display: "inline-block", width: 20, height: 12, background: "#dcfce7", border: "1px solid #86efac" }}></span>
+          Lecture Room
+        </span>
+        <span style={{ display: "flex", alignItems: "center", gap: 6 }}>
+          <span style={{ display: "inline-block", width: 20, height: 12, background: theme.light2, border: `1px solid ${theme.border}` }}></span>
+          Laboratory
+        </span>
+        <span style={{ display: "flex", alignItems: "center", gap: 6 }}>
+          <span style={{ display: "inline-block", width: 20, height: 12, background: "#fef9c3", border: "1px solid #fde68a" }}></span>
+          TBA Room
+        </span>
+        <span style={{ display: "flex", alignItems: "center", gap: 6 }}>
+          <span style={{ display: "inline-block", width: 20, height: 12, background: "#ecfdf5", border: "1px solid #86efac" }}></span>
+          Primary Pref
+        </span>
+        <span style={{ display: "flex", alignItems: "center", gap: 6 }}>
+          <span style={{ display: "inline-block", width: 20, height: 12, background: "#fffbeb", border: "1px solid #fde68a" }}></span>
+          Secondary Pref
+        </span>
+      </div>
+
+      {/* Main Grid Table */}
+      <div style={{ overflowX: "auto" }}>
+        <table style={{ borderCollapse: "collapse", width: "100%", fontSize: 13 }}>
+          <thead>
+            <tr>
+              <th style={{ ...thStyle, minWidth: "auto" }}>Time</th>
+              {DAYS.map(d => <th key={d} style={thStyle}>{d}</th>)}
+            </tr>
+          </thead>
+          <tbody>
+            {TIMES.map(t => (
+              <tr key={t}>
+                <td style={{
+                  padding: "4px 6px",
+                  border: `1px solid ${theme.light2}`,
+                  whiteSpace: "nowrap",
+                  fontWeight: 600,
+                  fontSize: 11,
+                  color: theme.primary,
+                  background: theme.light,
+                }}>
+                  {fmtRange(t, t + TIME_STEP)}
                 </td>
-              );
-            })}
-          </tr>
-        ))}</tbody>
-      </table>
+                {DAYS.map(day => {
+                  const cell = grid[day]?.[t] || {};
+                  const sub = cell.subject || "";
+                  const room = cell.room || "";
+                  const rt = cell.roomType || "Lecture";
+                  const inst = cell.instructor || "";
+                  const lab = rt === "Laboratory";
+                  const instKey = normName(inst);
+                  const subsList = assignedSubjects[instKey] || [];
+                  const geSubjects = subsList.filter(s => s.subject_type === "GE");
+                  const majorSubjects = subsList.filter(s => s.subject_type === "Major");
+                  const prefColor = getPreferenceColor(day, t, inst);
+
+                  return (
+                    <td
+                      key={day}
+                      style={{
+                        padding: "5px 6px",
+                        border: `1px solid ${theme.light2}`,
+                        verticalAlign: "top",
+                        background: sub ? (lab ? theme.light2 : theme.light) : prefColor || "transparent",
+                      }}
+                    >
+                      {assignedInstructorList.length > 0 ? (
+                        <InstructorSelect
+                          value={inst}
+                          onChange={e => upd(day, t, "instructor", e.target.value)}
+                          style={{
+                            width: "100%",
+                            padding: "4px 6px",
+                            border: `1px solid ${theme.border}`,
+                            borderRadius: 4,
+                            fontSize: 11,
+                            fontWeight: 600,
+                            boxSizing: "border-box",
+                            marginBottom: 4,
+                            color: inst ? theme.primary : "#94a3b8",
+                            background: "#fff",
+                          }}
+                        />
+                      ) : (
+                        <input
+                          style={{ ...inpStyle, width: "100%", color: theme.primary, fontWeight: 600 }}
+                          value={inst}
+                          placeholder="Instructor"
+                          onChange={e => upd(day, t, "instructor", e.target.value)}
+                        />
+                      )}
+
+                      {inst && subsList.length > 0 ? (
+                        <select
+                          style={{
+                            width: "100%",
+                            padding: "4px 6px",
+                            border: `1px solid ${theme.border}`,
+                            borderRadius: 4,
+                            fontSize: 11,
+                            boxSizing: "border-box",
+                            marginBottom: 4,
+                            color: sub ? "#0f172a" : "#94a3b8",
+                            background: "#fff",
+                          }}
+                          value={sub}
+                          onChange={e => upd(day, t, "subject", e.target.value)}
+                        >
+                          <option value="">— Subject —</option>
+                          {geSubjects.length > 0 && (
+                            <optgroup label="🌐 GE Subjects">
+                              {geSubjects.map(s => (
+                                <option key={s.subject_name} value={s.subject_name}>
+                                  {s.subject_name}
+                                </option>
+                              ))}
+                            </optgroup>
+                          )}
+                          {majorSubjects.length > 0 && (
+                            <optgroup label="🎯 Major Subjects">
+                              {majorSubjects.map(s => (
+                                <option key={s.subject_name} value={s.subject_name}>
+                                  {s.subject_name}
+                                </option>
+                              ))}
+                            </optgroup>
+                          )}
+                        </select>
+                      ) : inst && subsList.length === 0 ? (
+                        <div
+                          style={{
+                            fontSize: 11,
+                            color: "#ef4444",
+                            padding: "4px 6px",
+                            marginBottom: 4,
+                            background: "#fff0f0",
+                            borderRadius: 4,
+                            border: "1px solid #fca5a5",
+                          }}
+                        >
+                          ⚠ No subjects assigned
+                        </div>
+                      ) : (
+                        <input
+                          style={{
+                            ...inpStyle,
+                            width: "100%",
+                            opacity: inst ? 1 : 0.4,
+                          }}
+                          value={sub}
+                          placeholder={inst ? "Subject" : "Select instructor first"}
+                          disabled={!inst}
+                          onChange={e => upd(day, t, "subject", e.target.value)}
+                        />
+                      )}
+
+                      <select
+                        style={{
+                          width: "100%",
+                          padding: "5px 7px",
+                          border: `1px solid ${theme.border}`,
+                          borderRadius: 6,
+                          fontSize: 11,
+                        }}
+                        value={room}
+                        disabled={!sub}
+                        onChange={e => upd(day, t, "room", e.target.value)}
+                      >
+                        <option value="">— Select Room —</option>
+                        <option value="TBA" style={{ fontWeight: 700, color: "#d97706" }}>
+                          📌 TBA (To Be Arranged)
+                        </option>
+                        <optgroup label="Lecture Rooms">
+                          {LECTURE_ROOMS.map(r => (
+                            <option key={r} value={r}>
+                              {r}
+                            </option>
+                          ))}
+                        </optgroup>
+                        <optgroup label="Laboratories">
+                          {LAB_ROOMS.map(r => (
+                            <option key={r} value={r}>
+                              {r}
+                            </option>
+                          ))}
+                        </optgroup>
+                      </select>
+
+                      {sub && room && (
+                        <div
+                          style={{
+                            fontSize: 10,
+                            fontWeight: 700,
+                            color: lab ? theme.text : "#166534",
+                            background: lab ? theme.light2 : "#dcfce7",
+                            border: `1px solid ${lab ? theme.border : "#86efac"}`,
+                            borderRadius: 20,
+                            padding: "2px 7px",
+                            display: "inline-block",
+                            marginTop: 2,
+                          }}
+                        >
+                          {lab ? "🔬" : "📖"} {rt}
+                        </div>
+                      )}
+
+                      {sub && room && isRunStart(grid, day, t, sub) && (() => {
+                        const matchFields = { subject: sub, room, roomType: rt, section: "", instructor: inst };
+                        const runLen = getRunLength(grid, day, t, matchFields);
+                        const curDuration = +(runLen * TIME_STEP).toFixed(1);
+                        return (
+                          <select
+                            style={{
+                              width: "100%",
+                              marginTop: 4,
+                              padding: "3px 6px",
+                              border: `1px solid ${theme.border}`,
+                              borderRadius: 4,
+                              fontSize: 10,
+                              fontWeight: 600,
+                              color: theme.primary,
+                              background: "#fff",
+                              boxSizing: "border-box",
+                            }}
+                            value={curDuration}
+                            onChange={e => {
+                              const newDuration = Number(e.target.value);
+                              const oldSteps = runLen;
+                              const newSteps = Math.round(newDuration / TIME_STEP);
+                              if (newSteps < oldSteps) {
+                                trimRun(setGrid, day, t, oldSteps, newSteps);
+                              } else if (newSteps > oldSteps) {
+                                const err = applyBlockDuration(setGrid, day, t, newDuration, {
+                                  subject: sub,
+                                  room,
+                                  roomType: rt,
+                                  instructor: inst,
+                                });
+                                if (err) alert(err);
+                              }
+                            }}
+                          >
+                            {DURATIONS.map(d => (
+                              <option key={d} value={d}>
+                                {d}h
+                              </option>
+                            ))}
+                          </select>
+                        );
+                      })()}
+                    </td>
+                  );
+                })}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
     </div>
   );
 }
+
+
 
 /* ════════ PRINT MODAL — FACULTY ════════ */
 function PrintModal({ schedules, academicYear, semester, onClose, theme, codeMap }) {
@@ -1187,6 +1878,7 @@ function PrintModal({ schedules, academicYear, semester, onClose, theme, codeMap
               </div>
             );
           })}
+          <SignatureBlock theme={theme} />
         </div>
       </div>
     </div>
@@ -1287,6 +1979,7 @@ win.document.write(`<!DOCTYPE html><html><head><title>Student Schedule - ${secti
               })}
             </tbody>
           </table>
+          <SignatureBlock theme={theme} />
         </div>
       </div>
     </div>
@@ -1406,6 +2099,7 @@ function RoomPrintModal({ room, blocks, academicYear, semester, onClose, theme, 
               })}
             </tbody>
           </table>
+          <SignatureBlock theme={theme} />
         </div>
       </div>
     </div>
@@ -1428,11 +2122,44 @@ function RoomScheduleView({ instructorSchedules, studentSchedules, academicYear,
         <div><div style={{color:"#fff",fontWeight:800,fontSize:16}}>Room Schedule</div><div style={{color:"rgba(255,255,255,0.65)",fontSize:12,marginTop:2}}>Aggregated from Instructor &amp; Student schedules · {theme.code}</div></div>
         <div style={{marginLeft:"auto",display:"flex",gap:8,flexWrap:"wrap",alignItems:"center"}}>
           <span style={{fontSize:12,color:"rgba(255,255,255,0.7)",fontWeight:600}}>Filter Room:</span>
-          <select value={selectedRoom} onChange={e=>setSelectedRoom(e.target.value)} style={{padding:"7px 12px",borderRadius:7,border:"none",fontSize:13,fontWeight:600,background:"rgba(255,255,255,0.15)",color:"#fff",cursor:"pointer",outline:"none"}}>
-            <option value="All" style={{color:"#000"}}>All Rooms</option>
-            <optgroup label="── Lecture Rooms ──" style={{color:"#000"}}>{LECTURE_ROOMS.map(r=><option key={r} value={r} style={{color:"#000"}}>{r}</option>)}</optgroup>
-            <optgroup label="── Laboratories ──" style={{color:"#000"}}>{LAB_ROOMS.map(r=><option key={r} value={r} style={{color:"#000"}}>{r}</option>)}</optgroup>
-          </select>
+          <select
+  value={selectedRoom}
+  onChange={e => setSelectedRoom(e.target.value)}
+  style={{
+    padding: "6px",
+    borderRadius: 6,
+    border: `1px solid ${theme.border}`,
+    background: theme.card,
+    color: theme.text,
+  }}
+>
+  <option value="All" style={{ color: "#000" }}>
+    All Rooms
+  </option>
+
+  <option
+    value="TBA"
+    style={{ color: "#d97706", fontWeight: "bold" }}
+  >
+    📌 TBA (To Be Arranged)
+  </option>
+
+  <optgroup label="── Lecture Rooms ──">
+    {LECTURE_ROOMS.map(r => (
+      <option key={r} value={r} style={{ color: "#000" }}>
+        {r}
+      </option>
+    ))}
+  </optgroup>
+
+  <optgroup label="── Laboratories ──">
+    {LAB_ROOMS.map(r => (
+      <option key={r} value={r} style={{ color: "#000" }}>
+        {r}
+      </option>
+    ))}
+  </optgroup>
+</select>
         </div>
       </div>
       <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
@@ -2141,6 +2868,7 @@ function InstructorPoolPage({ theme, activeSemester, allSchedules = [] }) {
   );
 }
 
+
 /* ══════════════════════════════════════════════════════════════
    ══ INSTRUCTOR ASSIGNMENT PAGE ══
    ══════════════════════════════════════════════════════════════ */
@@ -2172,11 +2900,13 @@ function InstructorAssignmentPage({ theme, activeSemester }) {
     setLoading(false);
   }
 
-
-   async function handleAdd() {
+  async function handleAdd() {
     if (!form.instructor_id || !form.subject_id) { setErr("Please select both instructor and subject."); return; }
-    if (assignments.some(a => String(a.subject_id) === String(form.subject_id))) {
-      setErr(`This subject is already assigned to ${ownerOf(form.subject_id)}.`);
+    
+    // ✅ MODIFIED: Allow the same subject to be assigned to multiple instructors
+    // Check only if THIS SPECIFIC INSTRUCTOR already has THIS SUBJECT
+    if (assignments.some(a => String(a.instructor_id) === String(form.instructor_id) && String(a.subject_id) === String(form.subject_id))) {
+      setErr(`This instructor is already assigned to this subject.`);
       return;
     }
     setSaving(true); setErr("");
@@ -2202,11 +2932,19 @@ function InstructorAssignmentPage({ theme, activeSemester }) {
   const inpStyle   = { padding:"9px 12px", border:`1.5px solid ${theme.border}`, borderRadius:8, fontSize:14, outline:"none", background:"#fff", color:"#0f172a", width:"100%", boxSizing:"border-box" };
   const btnPrimary = { padding:"10px 22px", background:theme.primary, color:"#fff", border:"none", borderRadius:8, cursor:"pointer", fontSize:14, fontWeight:600 };
 
-  const alreadyAssigned = new Set(assignments.map(a => String(a.subject_id)));
-
-  function ownerOf(subjectId) {
-    return assignments.find(a => String(a.subject_id) === String(subjectId))?.instructor_name || "another instructor";
+  // ✅ MODIFIED: Get ALL instructors teaching a subject (not just the first one)
+  function getAllOwnersOf(subjectId) {
+    return assignments
+      .filter(a => String(a.subject_id) === String(subjectId))
+      .map(a => a.instructor_name)
+      .filter((name, index, arr) => arr.indexOf(name) === index); // Remove duplicates
   }
+
+  // ✅ NEW: Get instructor count for a subject
+  function getInstructorCountForSubject(subjectId) {
+    return getAllOwnersOf(subjectId).length;
+  }
+
   const subjectsByYear = [1,2,3,4].reduce((acc,y)=>{const ge=subjects.filter(s=>s.year_level===y&&s.subject_type==="GE"),major=subjects.filter(s=>s.year_level===y&&s.subject_type==="Major");if(ge.length||major.length)acc[y]={ge,major};return acc;},{});
 
   function getInstGroup(instId) {
@@ -2235,7 +2973,7 @@ function InstructorAssignmentPage({ theme, activeSemester }) {
     <div style={{display:"flex",flexDirection:"column",gap:20,width:"100%",maxWidth:1100,alignSelf:"flex-start"}}>
       <div style={{background:theme.headerBg,borderRadius:10,padding:"16px 22px",display:"flex",alignItems:"center",gap:14,flexWrap:"wrap"}}>
         <div style={{fontSize:28}}>🔗</div>
-        <div><div style={{color:"#fff",fontWeight:800,fontSize:16}}>Instructor Assignment</div><div style={{color:"rgba(255,255,255,0.65)",fontSize:12,marginTop:2}}>{theme.code} · <strong style={{color:"#fff"}}>{activeSemester}</strong> — Assign subjects (GE + Major allowed per instructor)</div></div>
+        <div><div style={{color:"#fff",fontWeight:800,fontSize:16}}>Instructor Assignment</div><div style={{color:"rgba(255,255,255,0.65)",fontSize:12,marginTop:2}}>{theme.code} · <strong style={{color:"#fff"}}>{activeSemester}</strong> — Assign subjects (multiple instructors can teach the same subject)</div></div>
         <div style={{marginLeft:"auto",background:"rgba(255,255,255,0.12)",borderRadius:8,padding:"8px 16px",textAlign:"center"}}>
           <div style={{color:"rgba(255,255,255,0.6)",fontSize:10}}>Assignments ({activeSemester})</div>
           <div style={{color:"#fff",fontSize:18,fontWeight:800}}>{assignments.length}</div>
@@ -2243,7 +2981,11 @@ function InstructorAssignmentPage({ theme, activeSemester }) {
       </div>
       <div style={{background:"#f0fdf4",border:"1px solid #86efac",borderRadius:10,padding:"12px 18px",fontSize:13,color:"#166534",display:"flex",gap:10,alignItems:"center"}}>
         <span style={{fontSize:18}}>ℹ️</span>
-        <span><strong>{instructors.length}</strong> instructor{instructors.length!==1?"s":""} available · <strong>{subjects.length}</strong> subject{subjects.length!==1?"s":""} this semester. An instructor can be assigned <strong>both GE and Major subjects</strong>.</span>
+        <span><strong>{instructors.length}</strong> instructor{instructors.length!==1?"s":""} available · <strong>{subjects.length}</strong> subject{subjects.length!==1?"s":""} this semester. <strong>Multiple instructors can teach the same subject</strong> (e.g., GE 1 in Section A & Section B).</span>
+      </div>
+      <div style={{background:"#dbeafe",border:"1px solid #bfdbfe",borderRadius:10,padding:"12px 18px",fontSize:13,color:"#1d4ed8",display:"flex",gap:10,alignItems:"center"}}>
+        <span style={{fontSize:18}}>👥</span>
+        <span><strong>New:</strong> One instructor can teach GE 1 in Section A, while another instructor teaches the same GE 1 in Section B. Simply select the same subject for multiple instructors!</span>
       </div>
       <div style={{background:"#fff",borderRadius:12,padding:24,boxShadow:`0 2px 10px rgba(0,0,0,0.07)`,borderTop:`4px solid ${theme.primary}`}}>
         <div style={{fontSize:15,fontWeight:700,color:"#0f172a",marginBottom:16}}>➕ New Assignment — {activeSemester}</div>
@@ -2264,14 +3006,27 @@ function InstructorAssignmentPage({ theme, activeSemester }) {
             <select style={inpStyle} value={form.subject_id} onChange={e=>setForm(f=>({...f,subject_id:e.target.value}))} disabled={!form.instructor_id}>
               <option value="">— Select Subject —</option>
               {Object.entries(subjectsByYear).map(([yr,{ge,major}])=>{
-                const geAvail=ge.filter(s=>!alreadyAssigned.has(String(s.id))),geUsed=ge.filter(s=>alreadyAssigned.has(String(s.id)));
-                const majorAvail=major.filter(s=>!alreadyAssigned.has(String(s.id))),majorUsed=major.filter(s=>alreadyAssigned.has(String(s.id)));
-                if(!geAvail.length&&!geUsed.length&&!majorAvail.length&&!majorUsed.length)return null;
+                if(!ge.length&&!major.length)return null;
                 return <optgroup key={yr} label={`── Year ${yr} ──`}>
-                 {geAvail.map(s=><option key={s.id} value={s.id}>🌐 {s.subject_code?`[${s.subject_code}] `:""}{s.subject_name} (GE)</option>)}
-                  {geUsed.map(s=><option key={s.id} value={s.id} disabled>✓ {s.subject_name} (GE — assigned to {ownerOf(s.id)})</option>)}
-                  {majorAvail.map(s=><option key={s.id} value={s.id}>🎯 {s.subject_code?`[${s.subject_code}] `:""}{s.subject_name} (Major)</option>)}
-                  {majorUsed.map(s=><option key={s.id} value={s.id} disabled>✓ {s.subject_name} (Major — assigned to {ownerOf(s.id)})</option>)}
+                  {/* ✅ MODIFIED: Show all subjects, not marking any as "used" */}
+                  {ge.map(s=>{
+                    const instructorCount = getInstructorCountForSubject(s.id);
+                    const owners = getAllOwnersOf(s.id);
+                    return (
+                      <option key={s.id} value={s.id}>
+                        🌐 {s.subject_code?`[${s.subject_code}] `:""}{s.subject_name} (GE){instructorCount > 0 ? ` — ${instructorCount} instructor${instructorCount!==1?"s":""}: ${owners.slice(0,2).join(", ")}${instructorCount > 2 ? ", ..." : ""}` : ""}
+                      </option>
+                    );
+                  })}
+                  {major.map(s=>{
+                    const instructorCount = getInstructorCountForSubject(s.id);
+                    const owners = getAllOwnersOf(s.id);
+                    return (
+                      <option key={s.id} value={s.id}>
+                        🎯 {s.subject_code?`[${s.subject_code}] `:""}{s.subject_name} (Major){instructorCount > 0 ? ` — ${instructorCount} instructor${instructorCount!==1?"s":""}: ${owners.slice(0,2).join(", ")}${instructorCount > 2 ? ", ..." : ""}` : ""}
+                      </option>
+                    );
+                  })}
                 </optgroup>;
               })}
             </select>
@@ -2360,21 +3115,489 @@ function InstructorAssignmentPage({ theme, activeSemester }) {
   );
 }
 
+/* ════════════════════════════════════════════════════════════
+   INSTRUCTOR PREFERENCE MANAGER
+   ════════════════════════════════════════════════════════════ */
+
+function InstructorPreferencesPage({ theme, activeSemester }) {
+  const [instructors, setInstructors] = useState([]);
+  const [instructorPreferencesOverview, setInstructorPreferencesOverview] = useState([]);
+  const [selectedInstructor, setSelectedInstructor] = useState("");
+  const [preferences, setPreferences] = useState([]);
+  const [occupancy, setOccupancy] = useState([]);
+  const [loading, setLoading] = useState(false);
+  const [overviewLoading, setOverviewLoading] = useState(false);
+  const [form, setForm] = useState({ day: "Monday", time_start: 8, time_end: 12, priority: "primary" });
+  const [saving, setSaving] = useState(false);
+  const [deleteConfirm, setDeleteConfirm] = useState(null);
+
+  const DAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
+  const TIMES = Array.from({ length: 27 }, (_, i) => +(7 + i * 0.5).toFixed(1));
+
+  // Load instructor pool
+  useEffect(() => {
+    fetch("/api/instructor-pool", { credentials: "include" })
+      .then(r => r.ok ? r.json() : [])
+      .then(list => setInstructors(Array.isArray(list) ? list.filter(i => i.name) : []))
+      .catch(() => setInstructors([]));
+  }, []);
+
+  // Load overview of ALL instructors with preferences
+  useEffect(() => {
+    loadInstructorPreferencesOverview();
+  }, [activeSemester]);
+
+  // Load specific instructor preferences when selected
+  useEffect(() => {
+    if (!selectedInstructor) {
+      setPreferences([]);
+      setOccupancy([]);
+      return;
+    }
+    loadPreferences();
+  }, [selectedInstructor, activeSemester]);
+
+  async function loadInstructorPreferencesOverview() {
+    setOverviewLoading(true);
+    try {
+      const res = await fetch(`/api/instructor-preferences-overview?semester=${encodeURIComponent(activeSemester)}`, { credentials: "include" });
+      const data = res.ok ? await res.json() : [];
+      setInstructorPreferencesOverview(Array.isArray(data) ? data : []);
+    } catch {
+      setInstructorPreferencesOverview([]);
+    }
+    setOverviewLoading(false);
+  }
+
+  async function loadPreferences() {
+    setLoading(true);
+    try {
+      const inst = instructors.find(i => i.name === selectedInstructor);
+      if (!inst) return;
+
+      const [prefRes, occRes] = await Promise.all([
+        fetch(`/api/instructor-preferences?instructor_id=${inst.id}&semester=${encodeURIComponent(activeSemester)}`, { credentials: "include" }),
+        fetch(`/api/instructor-preference-occupancy?instructor_id=${inst.id}&semester=${encodeURIComponent(activeSemester)}`, { credentials: "include" }),
+      ]);
+
+      const prefs = prefRes.ok ? await prefRes.json() : [];
+      const occ = occRes.ok ? await occRes.json() : [];
+      setPreferences(Array.isArray(prefs) ? prefs : []);
+      setOccupancy(Array.isArray(occ) ? occ : []);
+    } catch {}
+    setLoading(false);
+  }
+
+  async function handleAdd() {
+    if (form.time_start >= form.time_end) {
+      alert("Start time must be before end time.");
+      return;
+    }
+    setSaving(true);
+    try {
+      const inst = instructors.find(i => i.name === selectedInstructor);
+      const res = await fetch("/api/instructor-preferences", {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          instructor_id: inst.id,
+          semester: activeSemester,
+          day: form.day,
+          time_start: form.time_start,
+          time_end: form.time_end,
+          priority: form.priority,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        alert(data.error || "Failed to add preference.");
+        setSaving(false);
+        return;
+      }
+      setPreferences([...preferences, data]);
+      setForm({ day: "Monday", time_start: 8, time_end: 12, priority: "primary" });
+      loadPreferences();
+      loadInstructorPreferencesOverview();
+    } catch (e) {
+      console.error(e);
+    }
+    setSaving(false);
+  }
+
+  async function handleDelete(id) {
+    try {
+      const res = await fetch(`/api/instructor-preferences/${id}`, { method: "DELETE", credentials: "include" });
+      if (!res.ok) {
+        alert("Failed to delete preference.");
+        return;
+      }
+      setPreferences(preferences.filter(p => p.id !== id));
+      setDeleteConfirm(null);
+      loadPreferences();
+      loadInstructorPreferencesOverview();
+    } catch (e) {
+      console.error(e);
+    }
+  }
+
+  const getOccupancyForPref = (prefId) => occupancy.find(o => o.prefId === prefId);
+
+  // Calculate star rating based on occupancy percentage
+  const getStarRating = (occupancyPercentage) => {
+    if (occupancyPercentage === undefined || occupancyPercentage === null) return 0;
+    
+    if (occupancyPercentage <= 20) return 5; // Can meet preferences easily
+    if (occupancyPercentage <= 40) return 5; // Can meet preferences
+    if (occupancyPercentage <= 60) return 4; // Mostly available
+    if (occupancyPercentage <= 75) return 3; // Needs minor adjustment
+    if (occupancyPercentage <= 90) return 2; // Needs significant adjustment
+    return 1; // Cannot be met, needs to adjust
+  };
+
+  // Render stars visual
+  const renderStars = (rating) => {
+    return (
+      <div style={{ display: "flex", gap: 3 }}>
+        {[1, 2, 3, 4, 5].map(i => (
+          <span key={i} style={{ fontSize: 16, color: i <= rating ? "#fbbf24" : "#e5e7eb" }}>
+            ★
+          </span>
+        ))}
+      </div>
+    );
+  };
+
+  // Get status text
+  const getStatusMessage = (rating) => {
+    if (rating === 5) return "✓ Can be met";
+    if (rating === 4) return "⚠ Mostly available";
+    if (rating === 3) return "⚠ Needs adjustment";
+    if (rating === 2) return "✗ Needs major adjustment";
+    return "✗ Cannot be met";
+  };
+
+  const inpStyle = { 
+    padding: "9px 12px", 
+    border: `1px solid ${theme.border}`, 
+    borderRadius: 8, 
+    fontSize: 14, 
+    outline: "none", 
+    background: "#fff",
+    color: "#0f172a",
+    fontWeight: 500
+  };
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 20, width: "100%", maxWidth: 1100, alignSelf: "flex-start" }}>
+      {/* HEADER */}
+      <div style={{ background: theme.headerBg, borderRadius: 10, padding: "16px 22px", display: "flex", alignItems: "center", gap: 14, flexWrap: "wrap" }}>
+        <div style={{ fontSize: 28 }}>⏰</div>
+        <div>
+          <div style={{ color: "#fff", fontWeight: 800, fontSize: 16 }}>Instructor Preferences</div>
+          <div style={{ color: "rgba(255,255,255,0.65)", fontSize: 12, marginTop: 2 }}>Set preferred days & times for scheduling · {activeSemester}</div>
+        </div>
+      </div>
+
+      {/* INFO BOX */}
+      <div style={{ background: "#dbeafe", border: "1px solid #bfdbfe", borderRadius: 10, padding: "12px 18px", fontSize: 13, color: "#1d4ed8", display: "flex", gap: 10, alignItems: "flex-start" }}>
+        <span style={{ fontSize: 18 }}>ℹ️</span>
+        <span>Set your <strong>Primary</strong> preferences (best times) and <strong>Secondary</strong> preferences (if needed). Star ratings show if schedules can be met: ★★★★★ = Can be met, ★ = Needs adjustment.</span>
+      </div>
+
+      {/* 👥 INSTRUCTORS WITH PREFERENCES OVERVIEW - Shows all instructors with preferences */}
+      <div style={{ background: "#fff", borderRadius: 12, padding: 24, boxShadow: `0 2px 10px rgba(0,0,0,0.07)`, borderTop: `4px solid ${theme.primary}` }}>
+        <div style={{ fontSize: 15, fontWeight: 700, color: "#0f172a", marginBottom: 18, display: "flex", alignItems: "center", gap: 8 }}>
+          👥 Instructors with Preferences Set
+        </div>
+
+        {overviewLoading ? (
+          <div style={{ textAlign: "center", padding: "30px 0", color: "#94a3b8", fontSize: 13 }}>Loading instructors…</div>
+        ) : instructorPreferencesOverview.length === 0 ? (
+          <div style={{ textAlign: "center", padding: "30px 0", color: "#94a3b8", fontSize: 13 }}>No instructors have set preferences yet.</div>
+        ) : (
+          <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+            {instructorPreferencesOverview.map(instructor => (
+              <div 
+                key={instructor.instructorId} 
+                style={{ 
+                  padding: "16px 18px", 
+                  border: `1px solid #e2e8f0`, 
+                  borderRadius: 12, 
+                  background: "#f8fafc",
+                  cursor: "pointer",
+                  transition: "all 0.2s ease",
+                  boxShadow: "0 1px 3px rgba(0,0,0,0.03)"
+                }}
+                onClick={() => setSelectedInstructor(instructor.instructorName)}
+                onMouseEnter={(e) => e.currentTarget.style.boxShadow = "0 4px 12px rgba(0,0,0,0.08)"}
+                onMouseLeave={(e) => e.currentTarget.style.boxShadow = "0 1px 3px rgba(0,0,0,0.03)"}
+              >
+                {/* Instructor Name */}
+                <div style={{ fontSize: 14, fontWeight: 700, color: "#0f172a", marginBottom: 12 }}>
+                  {instructor.instructorName}
+                </div>
+                
+                {/* Preferences Grid */}
+                <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                  {instructor.preferences && instructor.preferences.length > 0 ? (
+                    instructor.preferences.map((pref, idx) => {
+                      const occupancyData = instructor.occupancy?.find(o => o.prefId === pref.id);
+                      const occupancyPercentage = occupancyData?.percentage || 0;
+                      const rating = getStarRating(occupancyPercentage);
+                      const statusMsg = getStatusMessage(rating);
+                      
+                      return (
+                        <div key={idx} style={{
+                          display: "flex",
+                          alignItems: "center",
+                          gap: 14,
+                          padding: "10px 12px",
+                          background: "#fff",
+                          borderRadius: 10,
+                          border: `1px solid ${pref.priority === "primary" ? "#bfdbfe" : "#e2e8f0"}`,
+                          transition: "all 0.2s ease"
+                        }}
+                        onMouseEnter={(e) => e.currentTarget.style.boxShadow = "0 2px 8px rgba(0,0,0,0.06)"}
+                        onMouseLeave={(e) => e.currentTarget.style.boxShadow = "none"}
+                        >
+                          {/* Priority Icon */}
+                          <span style={{ fontSize: 12, minWidth: 20 }}>
+                            {pref.priority === "primary" ? "🎯" : "📋"}
+                          </span>
+                          
+                          {/* Day & Time */}
+                          <div style={{ flex: 1 }}>
+                            <div style={{ fontSize: 13, fontWeight: 700, color: "#0f172a", marginBottom: 4 }}>
+                              {pref.day} · {fmtH(pref.time_start)}–{fmtH(pref.time_end)}
+                            </div>
+                            <div style={{ fontSize: 11, color: "#64748b", marginBottom: 3 }}>
+                              {occupancyData ? `${occupancyData.occupiedCount}/${occupancyData.totalSlots} slots filled (${occupancyPercentage}%)` : "Loading…"}
+                            </div>
+                          </div>
+
+                          {/* Stars & Status */}
+                          <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 6, minWidth: 100 }}>
+                            {renderStars(rating)}
+                            <div style={{ 
+                              fontSize: 10, 
+                              color: rating >= 4 ? "#166534" : rating >= 3 ? "#854d0e" : "#dc2626", 
+                              fontWeight: 600, 
+                              textAlign: "center" 
+                            }}>
+                              {statusMsg}
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    })
+                  ) : (
+                    <div style={{ fontSize: 12, color: "#94a3b8", fontStyle: "italic" }}>No preferences set</div>
+                  )}
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* SELECT INSTRUCTOR SECTION */}
+      <div style={{ background: "#fff", borderRadius: 12, padding: 24, boxShadow: `0 2px 10px rgba(0,0,0,0.07)`, borderTop: `4px solid ${theme.primary}` }}>
+        <div style={{ fontSize: 15, fontWeight: 700, color: "#0f172a", marginBottom: 16 }}>Select Instructor to Edit</div>
+        <select
+          style={{ 
+            ...inpStyle, 
+            width: "100%", 
+            boxSizing: "border-box", 
+            fontWeight: 600,
+            color: selectedInstructor ? "#0f172a" : "#94a3b8"
+          }}
+          value={selectedInstructor}
+          onChange={e => setSelectedInstructor(e.target.value)}
+        >
+          <option value="">— Select Instructor —</option>
+          {instructors.map(i => (
+            <option key={i.id} value={i.name} style={{ color: "#0f172a", background: "#fff" }}>
+              {i.name}
+            </option>
+          ))}
+        </select>
+      </div>
+
+      {/* ADD PREFERENCE SECTION - Only shows when instructor selected */}
+      {selectedInstructor && (
+        <>
+          <div style={{ background: "#fff", borderRadius: 12, padding: 24, boxShadow: `0 2px 10px rgba(0,0,0,0.07)`, borderTop: `4px solid ${theme.primary}` }}>
+            <div style={{ fontSize: 15, fontWeight: 700, color: "#0f172a", marginBottom: 16 }}>➕ Add Preference Window</div>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", gap: 12, alignItems: "end" }}>
+              <div>
+                <label style={{ fontSize: 12, fontWeight: 600, color: "#374151", display: "block", marginBottom: 5 }}>Day</label>
+                <select 
+                  style={{...inpStyle, color: "#0f172a"}} 
+                  value={form.day} 
+                  onChange={e => setForm(f => ({ ...f, day: e.target.value }))}
+                >
+                  {DAYS.map(d => (
+                    <option key={d} value={d} style={{ color: "#0f172a", background: "#fff" }}>
+                      {d}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div>
+                <label style={{ fontSize: 12, fontWeight: 600, color: "#374151", display: "block", marginBottom: 5 }}>Start Time</label>
+                <select 
+                  style={{...inpStyle, color: "#0f172a"}} 
+                  value={form.time_start} 
+                  onChange={e => setForm(f => ({ ...f, time_start: Number(e.target.value) }))}
+                >
+                  {TIMES.filter(t => t <= 18).map(t => (
+                    <option key={t} value={t} style={{ color: "#0f172a", background: "#fff" }}>
+                      {fmtH(t)}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div>
+                <label style={{ fontSize: 12, fontWeight: 600, color: "#374151", display: "block", marginBottom: 5 }}>End Time</label>
+                <select 
+                  style={{...inpStyle, color: "#0f172a"}} 
+                  value={form.time_end} 
+                  onChange={e => setForm(f => ({ ...f, time_end: Number(e.target.value) }))}
+                >
+                  {TIMES.filter(t => t > form.time_start).map(t => (
+                    <option key={t} value={t} style={{ color: "#0f172a", background: "#fff" }}>
+                      {fmtH(t)}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div>
+                <label style={{ fontSize: 12, fontWeight: 600, color: "#374151", display: "block", marginBottom: 5 }}>Priority</label>
+                <select 
+                  style={{...inpStyle, color: "#0f172a"}} 
+                  value={form.priority} 
+                  onChange={e => setForm(f => ({ ...f, priority: e.target.value }))}
+                >
+                  <option value="primary" style={{ color: "#0f172a", background: "#fff" }}>🎯 Primary</option>
+                  <option value="secondary" style={{ color: "#0f172a", background: "#fff" }}>📋 Secondary</option>
+                </select>
+              </div>
+            </div>
+            <button
+              style={{ marginTop: 14, padding: "10px 22px", background: theme.primary, color: "#fff", border: "none", borderRadius: 8, cursor: "pointer", fontSize: 14, fontWeight: 600 }}
+              onClick={handleAdd}
+              disabled={saving}
+            >
+              {saving ? "Adding…" : "✓ Add Preference"}
+            </button>
+          </div>
+
+          {/* PREFERENCES LIST */}
+          {loading ? (
+            <div style={{ textAlign: "center", padding: "40px 0", color: "#94a3b8" }}>Loading preferences…</div>
+          ) : preferences.length === 0 ? (
+            <div style={{ textAlign: "center", padding: "40px 0", color: "#94a3b8", fontSize: 14 }}>No preferences set yet. Add one above.</div>
+          ) : (
+            <div style={{ background: "#fff", borderRadius: 12, overflow: "hidden", boxShadow: `0 2px 8px rgba(0,0,0,0.06)` }}>
+              <div style={{ background: theme.primary, color: "#fff", padding: "10px 20px", fontSize: 13, fontWeight: 700, display: "flex", alignItems: "center", gap: 10 }}>
+                ⏰ {selectedInstructor}'s Preferences — {preferences.length} window{preferences.length !== 1 ? "s" : ""}
+              </div>
+              <div style={{ padding: "14px 20px", display: "flex", flexDirection: "column", gap: 10 }}>
+                {preferences.map(pref => {
+                  const occ = getOccupancyForPref(pref.id);
+                  const occupancyPercentage = occ?.percentage || 0;
+                  const rating = getStarRating(occupancyPercentage);
+                  const statusMsg = getStatusMessage(rating);
+
+                  const badge = occ ? (
+                    <span style={{
+                      fontSize: 10,
+                      fontWeight: 700,
+                      padding: "4px 10px",
+                      borderRadius: 20,
+                      background: occ.percentage >= 80 ? "#fee2e2" : occ.percentage >= 50 ? "#fef9c3" : "#dcfce7",
+                      color: occ.percentage >= 80 ? "#dc2626" : occ.percentage >= 50 ? "#854d0e" : "#166534",
+                      border: occ.percentage >= 80 ? "1px solid #fca5a5" : occ.percentage >= 50 ? "1px solid #fde68a" : "1px solid #86efac",
+                    }}>
+                      {occ.percentage}% full
+                    </span>
+                  ) : null;
+
+                  return (
+                    <div key={pref.id} style={{ display: "flex", alignItems: "center", gap: 12, padding: "14px 16px", border: `1px solid ${theme.light2}`, borderRadius: 10, background: pref.priority === "primary" ? "#eff6ff" : "#f8fafc" }}>
+                      <span style={{ fontSize: 16, minWidth: 28 }}>{pref.priority === "primary" ? "🎯" : "📋"}</span>
+                      <div style={{ flex: 1 }}>
+                        <div style={{ fontSize: 13, fontWeight: 700, color: "#0f172a", marginBottom: 3 }}>
+                          {pref.day} · {fmtH(pref.time_start)}–{fmtH(pref.time_end)}
+                        </div>
+                        <div style={{ fontSize: 11, color: "#64748b" }}>
+                          {pref.priority === "primary" ? "Primary preference" : "Secondary preference"}
+                        </div>
+                      </div>
+                      
+                      {/* STAR RATING & STATUS */}
+                      <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 6, minWidth: 110 }}>
+                        {renderStars(rating)}
+                        <div style={{ fontSize: 9, color: rating >= 4 ? "#166534" : rating >= 3 ? "#854d0e" : "#dc2626", fontWeight: 600, textAlign: "center" }}>
+                          {statusMsg}
+                        </div>
+                      </div>
+
+                      {badge}
+                      {deleteConfirm === pref.id ? (
+                        <>
+                          <button
+                            onClick={() => handleDelete(pref.id)}
+                            style={{ padding: "5px 12px", background: "#ef4444", color: "#fff", border: "none", borderRadius: 5, cursor: "pointer", fontSize: 11, fontWeight: 700 }}
+                          >
+                            Yes
+                          </button>
+                          <button
+                            onClick={() => setDeleteConfirm(null)}
+                            style={{ padding: "5px 10px", background: "#f1f5f9", color: "#64748b", border: "1px solid #cbd5e1", borderRadius: 5, cursor: "pointer", fontSize: 11 }}
+                          >
+                            No
+                          </button>
+                        </>
+                      ) : (
+                        <button
+                          onClick={() => setDeleteConfirm(pref.id)}
+                          style={{ padding: "5px 12px", background: "#fee2e2", color: "#ef4444", border: "1px solid #fca5a5", borderRadius: 6, cursor: "pointer", fontSize: 11, fontWeight: 600 }}
+                        >
+                          🗑
+                        </button>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
+
+
 /* ════════ THEMED SIDEBAR ════════ */
 function Sidebar({ activePage, setActivePage, theme, previewDept, setPreviewDept }) {
   const auth = useAuth();
-  const menu = [
-    { label:"Dashboard" },
-    { label:"Academic Setup" },
-    { label:"Subject Setup" },
-    { label:"Instructor Pool" },
-    { label:"Instructor Assignment" },
-    { label:"Section Pool" },
-    { label:"Student Load" },
-    { label:"Instructor Load" },
-    { label:"Schedule Output" },
-    { label:"Room Schedule" },
-  ];
+const menu = [
+  { label:"Dashboard" },
+  { label:"Academic Setup" },
+  { label:"Subject Setup" },
+  { label:"Instructor Pool" },
+  { label:"Instructor Assignment" },
+  { label:"Instructor Preferences" },  // ← ADD THIS LINE
+  { label:"Section Pool" },
+  { label:"Student Load" },
+  { label:"Instructor Load" },
+  { label:"Schedule Output" },
+  { label:"Room Schedule" },
+];
   return (
     <div style={{width:252,minWidth:252,background:theme.sidebar,color:"#e2e8f0",padding:"20px 16px",display:"flex",flexDirection:"column",overflowY:"auto"}}>
       <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:6}}>
@@ -2425,8 +3648,13 @@ function Sidebar({ activePage, setActivePage, theme, previewDept, setPreviewDept
   );
 }
 
-/* ════════ PAGE CONTENT ════════ */
-/* ════════ DRAG-DROP INLINE SCHEDULE GRID — FACULTY ════════ */
+
+
+
+
+
+
+
 /* ════════════════════════════════════════════════════════════════
    InlineScheduleGrid — FACULTY PRINT FIX v3 (single page, no split)
    ════════════════════════════════════════════════════════════════
@@ -2692,12 +3920,6 @@ function InlineScheduleGrid({ schedules, allSchedules, academicYear, semester, o
         margin-top: 0;
       }
 
-      .lunch-cell {
-        font-size: 9pt !important;
-        font-weight: bold;
-        padding: 3px !important;
-      }
-
       .break-cell {
         font-size: 8pt !important;
         font-weight: bold;
@@ -2707,7 +3929,7 @@ function InlineScheduleGrid({ schedules, allSchedules, academicYear, semester, o
   /* COMPACT SIGNATURE BLOCK */
 .signature-block {
   width: 100%;
-  margin-top: 0.5in;        /* ⬅️ CHANGE THIS: from 0.1in to 0.6in */
+  margin-top: 0.5in;
   padding: 0;
   margin-bottom: 0.1in;
 }
@@ -2886,17 +4108,19 @@ function InlineScheduleGrid({ schedules, allSchedules, academicYear, semester, o
         />
       )}
 
-      {editingBlock && (
-        <EditModal
-          block={editingBlock}
-          theme={theme}
-          onClose={() => setEditingBlock(null)}
-          onSave={async (updated) => {
-            await onMoveBlock(editingBlock, { day: updated.day, start: updated.start, end: updated.end, room: updated.room });
-            setEditingBlock(null);
-          }}
-        />
-      )}
+    {editingBlock && (
+  <EditModal
+    block={editingBlock}
+    theme={theme}
+    onClose={() => setEditingBlock(null)}
+    onSave={async (updated) => {
+      await onMoveBlock(editingBlock, { day: updated.day, start: updated.start, end: updated.end, room: updated.room });
+      setEditingBlock(null);
+    }}
+    allSchedules={allSchedules}
+    instructorPool={instructorPool}
+  />
+)}
 
       {/* Legend + Print button row */}
       <div style={{ marginBottom: 12 }}>
@@ -2919,12 +4143,12 @@ function InlineScheduleGrid({ schedules, allSchedules, academicYear, semester, o
 
       {instructors.map(inst => {
         const rawCls = schedules
-          .filter(s => normName(s.instructor) === normName(inst) && !s.is_break)
+          .filter(s => normName(s.instructor) === normName(inst))
           .map(b => ({ ...b, start: Number(b.start), end: Number(b.end) }));
-        const cls = DAYS.flatMap(day => {
-          const dayBlocks = rawCls.filter(b => b.day === day);
-          return dayBlocks.length ? insertBreaks(dayBlocks) : [];
-        });
+        
+        // Don't insert automatic breaks - use only what's in the data
+        const cls = rawCls;
+        
         const realCls = cls.filter(s => !s.is_break);
         const total   = realCls.reduce((s, c) => s + (c.end - c.start), 0);
         const labH    = realCls.filter(c => c.roomType === "Laboratory").reduce((s, c) => s + (c.end - c.start), 0);
@@ -2982,14 +4206,6 @@ function InlineScheduleGrid({ schedules, allSchedules, academicYear, semester, o
                   </thead>
                   <tbody>
                     {instSlots.map(t => {
-                      if (t === LUNCH_START) return (
-                        <tr key="lunch">
-                          <td style={{ background: "#fef9c3", border: "1px solid #ddd" }} className="lunch-cell"></td>
-                          {DAYS.map(day => <td key={day} style={{ border: "1px solid #ddd", background: "#fef9c3", textAlign: "center" }} className="lunch-cell">🍽 Lunch</td>)}
-                        </tr>
-                      );
-                      if (t > LUNCH_START && t < LUNCH_END) return null;
-                      
                       const nextT = instSlots[instSlots.indexOf(t) + 1] ?? (t + 1);
                       return (
                         <tr key={t}>
@@ -3080,15 +4296,6 @@ function InlineScheduleGrid({ schedules, allSchedules, academicYear, semester, o
                   <tbody>
                     {instSlots.map(t => {
                       const nextT = instSlots[instSlots.indexOf(t) + 1] ?? (t + 1);
-                      if (t === LUNCH_START) return (
-                        <tr key="lunch">
-                          <td style={{ background: theme.light, border: "1px solid #ddd", padding: "4px 8px", fontWeight: 700, fontSize: 13, textAlign: "center", verticalAlign: "middle", color: theme.primary, whiteSpace: "nowrap" }}>
-                            {fmtRange(t, nextT)}
-                          </td>
-                          {DAYS.map(day => <td key={day} style={{ border: "1px solid #ddd", textAlign: "center", verticalAlign: "middle", padding: "10px 12px", background: "#fef9c3" }}><span style={{ fontSize: 12, color: "#854d0e", fontWeight: 700 }}>🍽 Lunch</span></td>)}
-                        </tr>
-                      );
-                      if (t > LUNCH_START && t < LUNCH_END) return null;
                       return (
                         <tr key={t}>
                           <td style={{ background: theme.light, border: "1px solid #ddd", padding: "10px 12px", fontWeight: 700, fontSize: 13, textAlign: "center", verticalAlign: "middle", color: theme.primary, whiteSpace: "nowrap" }}>{fmtRange(t, nextT)}</td>
@@ -3183,6 +4390,19 @@ function InlineScheduleGrid({ schedules, allSchedules, academicYear, semester, o
     </div>
   );
 }
+
+
+
+
+
+
+
+
+/* ════════ PAGE CONTENT ════════ */
+/* ════════ DRAG-DROP INLINE SCHEDULE GRID — FACULTY ════════ */
+
+
+  
 
 /* ════════ DRAG-DROP INLINE SCHEDULE GRID — STUDENT ════════ */
 /* ════════ DRAG-DROP INLINE SCHEDULE GRID — STUDENT ════════ */
@@ -3428,12 +4648,6 @@ function InlineStudentGrid({ schedules, allSchedules, academicYear, semester, on
         margin-top: 0;
       }
 
-      .lunch-cell {
-        font-size: 9pt !important;
-        font-weight: bold;
-        padding: 3px !important;
-      }
-
       .break-cell {
         font-size: 8pt !important;
         font-weight: bold;
@@ -3441,53 +4655,52 @@ function InlineStudentGrid({ schedules, allSchedules, academicYear, semester, on
       }
 
       /* COMPACT SIGNATURE BLOCK */
-       /* COMPACT SIGNATURE BLOCK */
-.signature-block {
-  width: 100%;
-  margin-top: 0.5in;        /* ⬅️ CHANGE THIS: from 0.1in to 0.6in */
-  padding: 0;
-  margin-bottom: 0.1in;
-}
+      .signature-block {
+        width: 100%;
+        margin-top: 0.5in;
+        padding: 0;
+        margin-bottom: 0.1in;
+      }
 
-.signature-row {
-  display: flex;
-  justify-content: space-between;
-  margin-bottom: 0.03in;
-  gap: 40px;
-}
+      .signature-row {
+        display: flex;
+        justify-content: space-between;
+        margin-bottom: 0.03in;
+        gap: 40px;
+      }
 
-.signature-item {
-  flex: 1;
-  text-align: center;
-}
+      .signature-item {
+        flex: 1;
+        text-align: center;
+      }
 
-.signature-line {
-  border-bottom: 1px solid #000;
-  width: 40%;
-  height: 0;
-  margin: 0 auto 0.01in auto;
-}
+      .signature-line {
+        border-bottom: 1px solid #000;
+        width: 40%;
+        height: 0;
+        margin: 0 auto 0.01in auto;
+      }
 
-.signature-label {
-  font-size: 7pt !important;
-  color: #666;
-  margin-bottom: 0.01in;
-  display: none;
-}
+      .signature-label {
+        font-size: 7pt !important;
+        color: #666;
+        margin-bottom: 0.01in;
+        display: none;
+      }
 
-.signature-name {
-  font-size: 7.5pt !important;
-  font-weight: bold;
-  margin-top: 0;
-  line-height: 1;
-}
+      .signature-name {
+        font-size: 7.5pt !important;
+        font-weight: bold;
+        margin-top: 0;
+        line-height: 1;
+      }
 
-.signature-title {
-  font-size: 6.5pt !important;
-  color: #555;
-  margin-top: 0;
-  line-height: 1;
-}
+      .signature-title {
+        font-size: 6.5pt !important;
+        color: #555;
+        margin-top: 0;
+        line-height: 1;
+      }
 
       @page { 
         size: A4 landscape;
@@ -3620,17 +4833,19 @@ function InlineStudentGrid({ schedules, allSchedules, academicYear, semester, on
         />
       )}
 
-      {editingBlock && (
-        <EditModal
-          block={editingBlock}
-          theme={theme}
-          onClose={() => setEditingBlock(null)}
-          onSave={async (updated) => {
-            await onMoveBlock(editingBlock, { day: updated.day, start: updated.start, end: updated.end, room: updated.room });
-            setEditingBlock(null);
-          }}
-        />
-      )}
+   {editingBlock && (
+  <EditModal
+    block={editingBlock}
+    theme={theme}
+    onClose={() => setEditingBlock(null)}
+    onSave={async (updated) => {
+      await onMoveBlock(editingBlock, { day: updated.day, start: updated.start, end: updated.end, room: updated.room });
+      setEditingBlock(null);
+    }}
+    allSchedules={allSchedules}            // ✅ Use allSchedules prop
+    instructorPool={instructorPool}
+  />
+)}
 
       <div style={{ marginBottom: 12 }}>
         <SubjectColorLegend blocks={schedules} codeMap={codeMap} />
@@ -3644,12 +4859,12 @@ function InlineStudentGrid({ schedules, allSchedules, academicYear, semester, on
 
       {sections.map(sec => {
         const rawCls = schedules
-          .filter(s => s.section === sec && !s.is_break)
+          .filter(s => s.section === sec)
           .map(b => ({ ...b, start: Number(b.start), end: Number(b.end) }));
-        const cls = DAYS.flatMap(day => {
-          const dayBlocks = rawCls.filter(b => b.day === day);
-          return dayBlocks.length ? insertBreaks(dayBlocks) : [];
-        });
+        
+        // Don't insert automatic breaks - use only what's in the data
+        const cls = rawCls;
+        
         const realCls = cls.filter(s => !s.is_break);
         const total   = realCls.reduce((s, c) => s + (c.end - c.start), 0);
         const labH    = realCls.filter(c => c.roomType === "Laboratory").reduce((s, c) => s + (c.end - c.start), 0);
@@ -3713,14 +4928,6 @@ function InlineStudentGrid({ schedules, allSchedules, academicYear, semester, on
                   </thead>
                   <tbody>
                     {timeSlots.map(t => {
-                      if (t === LUNCH_START) return (
-                        <tr key="lunch">
-                          <td style={{ background: "#fef9c3", border: "1px solid #ddd" }} className="lunch-cell"></td>
-                          {DAYS.map(day => <td key={day} style={{ border: "1px solid #ddd", background: "#fef9c3", textAlign: "center" }} className="lunch-cell">🍽 Lunch</td>)}
-                        </tr>
-                      );
-                      if (t > LUNCH_START && t < LUNCH_END) return null;
-                      
                       const nextT = timeSlots[timeSlots.indexOf(t) + 1] ?? (t + 1);
                       return (
                         <tr key={t}>
@@ -3813,15 +5020,6 @@ function InlineStudentGrid({ schedules, allSchedules, academicYear, semester, on
                   <tbody>
                     {timeSlots.map(t => {
                       const nextT = timeSlots[timeSlots.indexOf(t) + 1] ?? (t + 1);
-                      if (t === LUNCH_START) return (
-                        <tr key="lunch">
-                          <td style={{ background: theme.light, border: "1px solid #ddd", padding: "4px 8px", fontWeight: 700, fontSize: 13, textAlign: "center", verticalAlign: "middle", color: theme.primary, whiteSpace: "nowrap" }}>
-                            {fmtRange(t, nextT)}
-                          </td>
-                          {DAYS.map(day => <td key={day} style={{ border: "1px solid #ddd", textAlign: "center", verticalAlign: "middle", padding: "10px 12px", background: "#fef9c3" }}><span style={{ fontSize: 12, color: "#854d0e", fontWeight: 700 }}>🍽 Lunch</span></td>)}
-                        </tr>
-                      );
-                      if (t > LUNCH_START && t < LUNCH_END) return null;
                       return (
                         <tr key={t}>
                           <td style={{ background: theme.light, border: "1px solid #ddd", padding: "10px 12px", fontWeight: 700, fontSize: 13, textAlign: "center", verticalAlign: "middle", color: theme.primary, whiteSpace: "nowrap" }}>{fmtRange(t, nextT)}</td>
@@ -3918,7 +5116,7 @@ function InlineStudentGrid({ schedules, allSchedules, academicYear, semester, on
 }
 
 
-
+/* ════════ DRAG-DROP INLINE ROOM GRID ════════ */
 /* ════════ DRAG-DROP INLINE ROOM GRID ════════ */
 function InlineRoomGrid({ instructorSchedules, studentSchedules, allSchedules, academicYear, semester, onMoveBlock, onCheckMove, theme, codeMap, instructorPool = [] }) {
   const [dragBlock, setDragBlock] = useState(null);
@@ -3927,11 +5125,12 @@ function InlineRoomGrid({ instructorSchedules, studentSchedules, allSchedules, a
   const [selectedRoom, setSelectedRoom] = useState("All");
   const [collapsed, setCollapsed] = useState({});
   const [editingBlock, setEditingBlock] = useState(null);
+  
   const allBlocks  = buildRoomBlocks(instructorSchedules, studentSchedules);
   const usedRooms  = ALL_ROOMS.filter(r => allBlocks.some(b => b.room === r));
   const displayRooms = selectedRoom === "All" ? usedRooms : (usedRooms.includes(selectedRoom) ? [selectedRoom] : []);
 
-  // ── FIX: was `sections` (doesn't exist in this component) — must be `usedRooms` ──
+  // ✅ FIX: Changed from `sections` (doesn't exist) to `usedRooms`
   useEffect(() => {
     setCollapsed(prev => {
       const next = { ...prev };
@@ -3941,6 +5140,7 @@ function InlineRoomGrid({ instructorSchedules, studentSchedules, allSchedules, a
     });
   }, [usedRooms.join("|")]);
 
+  // ✅ CHANGE #1: Simplified time formatting - no special lunch handling needed
   const formatPrintTime = (start, end) => {
     const formatted = fmtRange(start, end).replace(/\s(?:AM|PM)\b/gi, "");
     const isAM = start < 12;
@@ -3952,6 +5152,7 @@ function InlineRoomGrid({ instructorSchedules, studentSchedules, allSchedules, a
     e.dataTransfer.effectAllowed = "move";
   };
 
+  // ✅ CHANGE #3: All timeslots now valid drop targets (no lunch restrictions)
   const handleDrop = async (e, day, time, room) => {
     e.preventDefault();
     if (!dragBlock) return;
@@ -4187,66 +5388,59 @@ function InlineRoomGrid({ instructorSchedules, studentSchedules, allSchedules, a
         margin-top: 0;
       }
 
-      .lunch-cell {
-        font-size: 9pt !important;
-        font-weight: bold;
-        padding: 3px !important;
-      }
-
       .break-cell {
         font-size: 8pt !important;
         font-weight: bold;
         padding: 2px !important;
       }
 
-      /* COMPACT SIGNATURE BLOCK */
-      /* COMPACT SIGNATURE BLOCK */
-.signature-block {
-  width: 100%;
-  margin-top: 0.5in;        /* ⬅️ CHANGE THIS: from 0.1in to 0.6in */
-  padding: 0;
-  margin-bottom: 0.1in;
-}
+      /* ✅ CHANGE #6: Signature block (lunch styling completely removed) */
+      .signature-block {
+        width: 100%;
+        margin-top: 0.5in;
+        padding: 0;
+        margin-bottom: 0.1in;
+      }
 
-.signature-row {
-  display: flex;
-  justify-content: space-between;
-  margin-bottom: 0.03in;
-  gap: 40px;
-}
+      .signature-row {
+        display: flex;
+        justify-content: space-between;
+        margin-bottom: 0.03in;
+        gap: 40px;
+      }
 
-.signature-item {
-  flex: 1;
-  text-align: center;
-}
+      .signature-item {
+        flex: 1;
+        text-align: center;
+      }
 
-.signature-line {
-  border-bottom: 1px solid #000;
-  width: 40%;
-  height: 0;
-  margin: 0 auto 0.01in auto;
-}
+      .signature-line {
+        border-bottom: 1px solid #000;
+        width: 40%;
+        height: 0;
+        margin: 0 auto 0.01in auto;
+      }
 
-.signature-label {
-  font-size: 7pt !important;
-  color: #666;
-  margin-bottom: 0.01in;
-  display: none;
-}
+      .signature-label {
+        font-size: 7pt !important;
+        color: #666;
+        margin-bottom: 0.01in;
+        display: none;
+      }
 
-.signature-name {
-  font-size: 7.5pt !important;
-  font-weight: bold;
-  margin-top: 0;
-  line-height: 1;
-}
+      .signature-name {
+        font-size: 7.5pt !important;
+        font-weight: bold;
+        margin-top: 0;
+        line-height: 1;
+      }
 
-.signature-title {
-  font-size: 6.5pt !important;
-  color: #555;
-  margin-top: 0;
-  line-height: 1;
-}
+      .signature-title {
+        font-size: 6.5pt !important;
+        color: #555;
+        margin-top: 0;
+        line-height: 1;
+      }
 
       @page { 
         size: A4 landscape;
@@ -4322,6 +5516,7 @@ function InlineRoomGrid({ instructorSchedules, studentSchedules, allSchedules, a
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+      {/* Toast for conflicts */}
       {toast && (
         <ConflictToast
           conflicts={toast.conflicts}
@@ -4342,18 +5537,20 @@ function InlineRoomGrid({ instructorSchedules, studentSchedules, allSchedules, a
         />
       )}
 
-      {editingBlock && (
-        <EditModal
-          block={editingBlock}
-          theme={theme}
-          onClose={() => setEditingBlock(null)}
-          onSave={async (updated) => {
-            await onMoveBlock(editingBlock, { day: updated.day, start: updated.start, end: updated.end, room: updated.room, roomType: getRoomType(updated.room) });
-            setEditingBlock(null);
-          }}
-        />
-      )}
-
+     {editingBlock && (
+  <EditModal
+    block={editingBlock}
+    theme={theme}
+    onClose={() => setEditingBlock(null)}
+    onSave={async (updated) => {
+      await onMoveBlock(editingBlock, { day: updated.day, start: updated.start, end: updated.end, room: updated.room });
+      setEditingBlock(null);
+    }}
+    allSchedules={allSchedules}            // ✅ Use allSchedules prop
+    instructorPool={instructorPool}
+  />
+)}
+      {/* Legend */}
       <div style={{ marginBottom: 12 }}>
         <SubjectColorLegend blocks={allBlocks} codeMap={codeMap} />
       </div>
@@ -4373,19 +5570,22 @@ function InlineRoomGrid({ instructorSchedules, studentSchedules, allSchedules, a
         <span style={{ fontSize: 12, color: "#64748b" }}>{usedRooms.length} room(s) in use · drag blocks to move across rooms & days</span>
       </div>
 
+      {/* Empty state */}
       {usedRooms.length === 0 && (
         <div style={{ textAlign: "center", padding: "48px 0", color: "#94a3b8", fontSize: 14 }}>
           No room data yet. Add instructor or student schedules first.
         </div>
       )}
 
+      {/* Room cards */}
       {displayRooms.map(room => {
         const isLab   = LAB_ROOMS.includes(room);
         const rawBlocks = allBlocks.filter(b => b.room === room).map(b => ({ ...b, start: Number(b.start), end: Number(b.end) }));
-        const blocks = DAYS.flatMap(day => {
-          const dayBlocks = rawBlocks.filter(b => b.day === day);
-          return dayBlocks.length ? insertBreaks(dayBlocks) : [];
-        });
+        
+        // ✅ CHANGE #2: No automatic break insertion — use only what's in the data
+        // Previously: const blocks = DAYS.flatMap(day => { ... insertBreaks(dayBlocks) ... });
+        const blocks = rawBlocks;
+        
         const realBlocks = blocks.filter(s => !s.is_break);
         const total = realBlocks.reduce((s, c) => s + (c.end - c.start), 0);
         const labH  = realBlocks.filter(c => c.roomType === "Laboratory").reduce((s, c) => s + (c.end - c.start), 0);
@@ -4453,14 +5653,6 @@ function InlineRoomGrid({ instructorSchedules, studentSchedules, allSchedules, a
                   </thead>
                   <tbody>
                     {timeSlots.map(t => {
-                      if (t === LUNCH_START) return (
-                        <tr key="lunch">
-                          <td style={{ background: "#fef9c3", border: "1px solid #ddd" }} className="lunch-cell"></td>
-                          {DAYS.map(day => <td key={day} style={{ border: "1px solid #ddd", background: "#fef9c3", textAlign: "center" }} className="lunch-cell">🍽 Lunch</td>)}
-                        </tr>
-                      );
-                      if (t > LUNCH_START && t < LUNCH_END) return null;
-                      
                       const nextT = timeSlots[timeSlots.indexOf(t) + 1] ?? (t + 1);
                       return (
                         <tr key={t}>
@@ -4478,6 +5670,7 @@ function InlineRoomGrid({ instructorSchedules, studentSchedules, allSchedules, a
                             const m = info.block;
                             const rowSpan = info.span;
 
+                            // ✅ CHANGE #5: Breaks only shown when explicitly marked as is_break
                             if (m.is_break) return (
                               <td key={day} rowSpan={rowSpan} style={{ border: "1px solid #ddd", textAlign: "center", background: "#fef9c3" }} className="break-cell">
                                 ☕ Break
@@ -4516,17 +5709,15 @@ function InlineRoomGrid({ instructorSchedules, studentSchedules, allSchedules, a
                 </table>
               </div>
 
-              {/* COMPACT SIGNATURE BLOCK */}
+              {/* Signature block (no lunch styling) */}
               <div className="signature-block">
                 <div className="signature-row">
                   <div className="signature-item">
-                    <div className="signature-label">Noted by:</div>
                     <div className="signature-line"></div>
                     <div className="signature-name">MYLEN B. PADERES</div>
                     <div className="signature-title">Dean SOICT</div>
                   </div>
                   <div className="signature-item">
-                    <div className="signature-label">Approved by:</div>
                     <div className="signature-line"></div>
                     <div className="signature-name">HEIDI A. PAMA</div>
                     <div className="signature-title">Academic Coordinator</div>
@@ -4535,6 +5726,7 @@ function InlineRoomGrid({ instructorSchedules, studentSchedules, allSchedules, a
               </div>
             </div>
             
+            {/* Display grid (on-screen table) */}
             {!collapsed[room] && (
               <div style={{ overflowX: "auto" }}>
                 <table style={{ width: "100%", borderCollapse: "collapse", tableLayout: "fixed", fontSize: 12 }}>
@@ -4553,15 +5745,6 @@ function InlineRoomGrid({ instructorSchedules, studentSchedules, allSchedules, a
                   <tbody>
                     {timeSlots.map(t => {
                       const nextT = timeSlots[timeSlots.indexOf(t) + 1] ?? (t + 1);
-                      if (t === LUNCH_START) return (
-                        <tr key="lunch">
-                          <td style={{ background: theme.light, border: "1px solid #ddd", padding: "4px 8px", fontWeight: 700, fontSize: 13, textAlign: "center", verticalAlign: "middle", color: theme.primary, whiteSpace: "nowrap" }}>
-                            {fmtRange(t, nextT)}
-                          </td>
-                          {DAYS.map(day => <td key={day} style={{ border: "1px solid #ddd", textAlign: "center", verticalAlign: "middle", padding: "10px 12px", background: "#fef9c3" }}><span style={{ fontSize: 12, color: "#854d0e", fontWeight: 700 }}>🍽 Lunch</span></td>)}
-                        </tr>
-                      );
-                      if (t > LUNCH_START && t < LUNCH_END) return null;
                       return (
                         <tr key={t}>
                           <td style={{ background: theme.light, border: "1px solid #ddd", padding: "10px 12px", fontWeight: 700, fontSize: 13, textAlign: "center", verticalAlign: "middle", color: theme.primary, whiteSpace: "nowrap" }}>{fmtRange(t, nextT)}</td>
@@ -4571,6 +5754,7 @@ function InlineRoomGrid({ instructorSchedules, studentSchedules, allSchedules, a
 
                             const isDragTarget = dragOver?.day === day && dragOver?.time === t;
 
+                            // ✅ CHANGE #3: All empty slots now valid drop targets
                             if (info.kind === "empty") return (
                               <td
                                 key={day}
@@ -4657,9 +5841,6 @@ function InlineRoomGrid({ instructorSchedules, studentSchedules, allSchedules, a
   );
 }
 
-
-
-
 function PageContent({ activePage, data, setData, theme, deptCode, codeMap }) {
   const auth = useAuth();
   const [grid,setGrid]=useState({});
@@ -4732,6 +5913,8 @@ function PageContent({ activePage, data, setData, theme, deptCode, codeMap }) {
     ...data.studentSchedules.filter(s=>!s.is_break),
   ];
 
+
+  
  // ── LINKED MOVE: updates the source block AND any matching block in the OTHER table ──
   // "Matching" = same subject + same day + same original start/end, and (same section OR same instructor)
 const findLinkedBlock = (block, otherList) => {
@@ -4921,10 +6104,10 @@ const handleLinkedMove = async (block, suggestion, sourceTable) => {
   };
 
   if (activePage==="Subject Setup")         return <SubjectSetupPage theme={theme} activeSemester={activeSemester} allSchedules={allRealSchedules}/>;
-  if (activePage==="Instructor Pool")       return <InstructorPoolPage theme={theme} activeSemester={activeSemester} allSchedules={data.schedules.filter(s=>!s.is_break)}/>;
-  if (activePage==="Instructor Assignment") return <InstructorAssignmentPage theme={theme} activeSemester={activeSemester}/>;
-  if (activePage==="Section Pool")          return <SectionPoolPage theme={theme} activeSemester={activeSemester}/>;
-
+if (activePage==="Instructor Pool")       return <InstructorPoolPage theme={theme} activeSemester={activeSemester} allSchedules={data.schedules.filter(s=>!s.is_break)}/>;
+if (activePage==="Instructor Assignment") return <InstructorAssignmentPage theme={theme} activeSemester={activeSemester}/>;
+if (activePage==="Instructor Preferences") return <InstructorPreferencesPage theme={theme} activeSemester={activeSemester} />;  // ← NEW
+if (activePage==="Section Pool")          return <SectionPoolPage theme={theme} activeSemester={activeSemester}/>;
   /* ── DASHBOARD ── */
   if (activePage==="Dashboard") {
     const scheduledInsts = [...new Set(data.schedules.filter(s=>!s.is_break&&s.instructor?.trim()).map(s=>s.instructor))];
@@ -5120,6 +6303,56 @@ if (activePage==="Academic Setup") {
         }
       } catch {}
 
+// Add this to your existing grid rendering (in InstructorLoad or StudentLoad)
+
+// At the top of your grid, show preference summary:
+{selectedInstructor && occupancy && (
+  <div style={{ display: "flex", gap: 12, flexWrap: "wrap", marginBottom: 16, padding: "12px 16px", background: theme.light2, borderRadius: 8, border: `1px solid ${theme.border}` }}>
+    <div style={{ fontSize: 12, fontWeight: 700, color: theme.text }}>Your Preference Windows:</div>
+    {occupancy
+      .filter(o => o.priority === "primary")
+      .map(o => (
+        <span key={`${o.day}-${o.priority}`} style={{ padding: "3px 12px", borderRadius: 20, fontSize: 11, fontWeight: 600, background: o.percentage >= 80 ? "#fee2e2" : o.percentage >= 50 ? "#fef9c3" : "#dcfce7", color: o.percentage >= 80 ? "#dc2626" : o.percentage >= 50 ? "#854d0e" : "#166534", border: o.percentage >= 80 ? "1px solid #fca5a5" : o.percentage >= 50 ? "1px solid #fde68a" : "1px solid #86efac" }}>
+          🎯 {o.day}: {o.percentage}% ({o.occupiedCount}/{o.totalSlots})
+        </span>
+      ))}
+    {occupancy
+      .filter(o => o.priority === "secondary")
+      .map(o => (
+        <span key={`${o.day}-${o.priority}`} style={{ padding: "3px 12px", borderRadius: 20, fontSize: 11, fontWeight: 600, background: "#f1f5f9", color: "#64748b", border: "1px solid #cbd5e1" }}>
+          📋 {o.day}: {o.percentage}%
+        </span>
+      ))}
+  </div>
+)}
+
+// In your table cell rendering:
+const getPreferenceColor = (day, startTime, endTime, preferences) => {
+  // Returns the cell background color based on preference match
+  if (!preferences || preferences.length === 0) return "transparent";
+  
+  for (const pref of preferences) {
+    if (pref.day === day && startTime < pref.time_end && endTime > pref.time_start) {
+      return pref.priority === "primary" ? "#ecfdf5" : "#fffbeb"; // Green for primary, yellow for secondary
+    }
+  }
+  return "#f8fafc"; // Light gray if outside preferences
+};
+
+// Apply to cell style:
+<td
+  style={{
+    border: "1px solid #ddd",
+    padding: "10px 12px",
+    background: getPreferenceColor(day, t, t + TIME_STEP, preferences),
+    // ... rest of styles
+  }}
+>
+  {/* cell content */}
+</td>
+
+
+
       const blocks=DAYS.flatMap(day=>{ const dayBlocks=rawBlocks.filter(b=>b.day===day); return insertBreaks(dayBlocks); });
       const realBlocks=blocks.filter(b=>!b.is_break);
       const combined=[...allRealSchedules,...realBlocks];
@@ -5300,7 +6533,7 @@ if (activePage==="Academic Setup") {
         const subjectList = subjectRes.ok ? await subjectRes.json() : [];
         for (const rb of rawBlocks) {
           const subDef = subjectList.find(s => normName(s.subject_name) === normName(rb.subject));
-          if (subDef && subDef.hour_load > 0) {
+         if (subDef && false) {
             const alreadyScheduled = allRealSchedules
               .filter(s => normName(s.subject) === normName(rb.subject))
               .reduce((sum, s) => sum + (Number(s.end) - Number(s.start)), 0);
@@ -5314,8 +6547,8 @@ if (activePage==="Academic Setup") {
         }
       } catch {}
 
-    const blocks=DAYS.flatMap(day=>{ const dayBlocks=rawBlocks.filter(b=>b.day===day); return insertBreaks(dayBlocks); });
-      const realBlocks=blocks.filter(b=>!b.is_break);
+      // Use exactly what the user entered — no automatic break/lunch insertion on save.
+      const realBlocks = rawBlocks;
       const combined=[...allRealSchedules,...realBlocks];
       const allConflicts=detectConflicts(combined);
       const newConflicts=allConflicts.filter(c=>realBlocks.some(b=>(b.section===c.blockA?.section&&b.day===c.blockA?.day&&b.start===c.blockA?.start)||(b.section===c.blockB?.section&&b.day===c.blockB?.day&&b.start===c.blockB?.start)||(b.room===c.blockA?.room&&b.day===c.blockA?.day&&b.start===c.blockA?.start)||(b.room===c.blockB?.room&&b.day===c.blockB?.day&&b.start===c.blockB?.start)));
@@ -5417,6 +6650,41 @@ const sectionsByYear = [1,2,3,4].reduce((acc,y)=>{
       data.studentSchedules.filter(s => !s.is_break && s.section?.trim()).map(s => normName(s.section))
     );
 
+// In StudentLoad, when displaying instructor selector:
+
+const InstructorSelectWithAvailability = ({ value, onChange, style, availableInstructors }) => (
+  <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+    <select style={style} value={value} onChange={onChange}>
+      <option value="">— Instructor —</option>
+      {availableInstructors.map(i => (
+        <option key={i.id} value={i.name}>
+          {i.name}
+        </option>
+      ))}
+    </select>
+    {value && (() => {
+      const inst = availableInstructors.find(i => i.name === value);
+      if (!inst || !inst.prefMatch) return null;
+      const badge = inst.prefMatch >= 80 ? "🟢" : inst.prefMatch >= 50 ? "🟡" : "🔴";
+      return (
+        <span style={{ fontSize: 10, fontWeight: 700, color: "#64748b" }}>
+          {badge} {inst.prefMatch}% preferred time match
+        </span>
+      );
+    })()}
+  </div>
+);
+
+
+
+
+
+
+
+
+
+
+
 
 
 
@@ -5489,6 +6757,12 @@ const sectionsByYear = [1,2,3,4].reduce((acc,y)=>{
       </div>
     );
   }
+
+
+
+
+
+
 
   /* ── SCHEDULE OUTPUT ── */
   /* ── SCHEDULE OUTPUT ── */

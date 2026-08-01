@@ -4,6 +4,7 @@ const express = require("express");
 const cors = require("cors");
 const pool = require("./database");
 const { CAPACITY } = require("./database");
+const db = pool;  // ← Add this!
 const { exec } = require("child_process");
 const path = require("path");
 const fs = require("fs");
@@ -14,6 +15,7 @@ const MAX_PIN_ATTEMPTS = 5;
 const MAX_PASS_ATTEMPTS = 5;
 const LOCK_DURATION_SEC = 15 * 60;
 
+
 const app = express();
 app.use(cors({ origin: "http://localhost:5173", credentials: true }));
 app.use(express.json());
@@ -23,6 +25,7 @@ app.use(session({
   saveUninitialized: false,
   cookie: { httpOnly: true, sameSite: "lax", secure: false, maxAge: 8 * 60 * 60 * 1000 },
 }));
+
 
 const pythonCmd = process.platform === "win32" ? "python" : "python3";
 
@@ -934,6 +937,268 @@ app.delete("/api/subjects/:id", isAuthenticated, async (req, res) => {
     res.json({ deleted: true });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
+
+
+
+
+// ════════════════════════════════════════════════════════════
+// INSTRUCTOR PREFERENCES ENDPOINTS
+// ════════════════════════════════════════════════════════════
+
+// GET all preferences for an instructor in a semester
+
+ 
+// Add/Replace these endpoints in your server.js file
+// These should be in the section with other instructor-related endpoints
+
+// ════════════════════════════════════════════════════════════
+// FIX 1: Make sure this endpoint exists in server.js
+// GET all instructors (used by dropdown)
+// ════════════════════════════════════════════════════════════
+
+app.get("/api/instructors", isAuthenticated, async (req, res) => {
+  try {
+    const deptId = getDeptId(req);
+    const where = deptId ? "WHERE department_id = $1" : "";
+    const params = deptId ? [deptId] : [];
+    const { rows } = await pool.query(`SELECT id, name, email FROM instructors ${where} ORDER BY name`, params);
+    console.log("Instructors endpoint - returning:", rows);
+    res.json(rows);
+  } catch (e) { 
+    console.error("Error fetching instructors:", e);
+    res.status(500).json({ error: e.message }); 
+  }
+});
+
+// ════════════════════════════════════════════════════════════
+// INSTRUCTOR PREFERENCES ENDPOINTS
+// ════════════════════════════════════════════════════════════
+
+// 1️⃣ GET all preferences for an instructor
+app.get("/api/instructor-preferences", isAuthenticated, async (req, res) => {
+  const { instructor_id, semester } = req.query;
+  try {
+    const result = await pool.query(
+      `SELECT id, instructor_id, semester, day, time_start, time_end, priority
+       FROM instructor_preferences
+       WHERE instructor_id = $1 AND semester = $2
+       ORDER BY day, time_start ASC`,
+      [instructor_id, semester]
+    );
+    res.json(result.rows || []);
+  } catch (err) {
+    console.error("Error fetching preferences:", err);
+    res.status(400).json({ error: err.message });
+  }
+});
+
+// 2️⃣ POST create new preference
+app.post("/api/instructor-preferences", isAuthenticated, async (req, res) => {
+  const { instructor_id, semester, day, time_start, time_end, priority } = req.body;
+  if (!instructor_id || !semester || !day || time_start === undefined || time_end === undefined || !priority) {
+    return res.status(400).json({ error: "Missing required fields" });
+  }
+  if (time_start >= time_end) {
+    return res.status(400).json({ error: "Start time must be before end time" });
+  }
+  try {
+    const result = await pool.query(
+      `INSERT INTO instructor_preferences (instructor_id, semester, day, time_start, time_end, priority)
+       VALUES ($1, $2, $3, $4, $5, $6)
+       RETURNING id, instructor_id, semester, day, time_start, time_end, priority`,
+      [instructor_id, semester, day, time_start, time_end, priority]
+    );
+    res.json(result.rows[0]);
+  } catch (err) {
+    console.error("Error creating preference:", err);
+    res.status(400).json({ error: err.message });
+  }
+});
+
+// 3️⃣ PUT update preference
+app.put("/api/instructor-preferences/:id", isAuthenticated, async (req, res) => {
+  const { id } = req.params;
+  const { day, time_start, time_end, priority } = req.body;
+  if (time_start >= time_end) {
+    return res.status(400).json({ error: "Start time must be before end time" });
+  }
+  try {
+    const result = await pool.query(
+      `UPDATE instructor_preferences
+       SET day = $1, time_start = $2, time_end = $3, priority = $4
+       WHERE id = $5
+       RETURNING id, instructor_id, semester, day, time_start, time_end, priority`,
+      [day, time_start, time_end, priority, id]
+    );
+    if (result.rows.length === 0) return res.status(404).json({ error: "Preference not found" });
+    res.json(result.rows[0]);
+  } catch (err) {
+    console.error("Error updating preference:", err);
+    res.status(400).json({ error: err.message });
+  }
+});
+
+// 4️⃣ DELETE preference
+app.delete("/api/instructor-preferences/:id", isAuthenticated, async (req, res) => {
+  const { id } = req.params;
+  try {
+    const result = await pool.query(
+      `DELETE FROM instructor_preferences WHERE id = $1 RETURNING id`,
+      [id]
+    );
+    if (result.rows.length === 0) return res.status(404).json({ error: "Preference not found" });
+    res.json({ deleted: true, id });
+  } catch (err) {
+    console.error("Error deleting preference:", err);
+    res.status(400).json({ error: err.message });
+  }
+});
+
+// 5️⃣ GET occupancy info (how full each preference window is)
+app.get("/api/instructor-preference-occupancy", isAuthenticated, async (req, res) => {
+  const { instructor_id, semester } = req.query;
+  try {
+    const prefs = await pool.query(
+      `SELECT id, day, time_start, time_end, priority
+       FROM instructor_preferences
+       WHERE instructor_id = $1 AND semester = $2`,
+      [instructor_id, semester]
+    );
+
+    const occupancy = [];
+    for (const pref of prefs.rows) {
+      const count = await pool.query(
+        `SELECT COUNT(*) as occupied
+         FROM schedules
+         WHERE instructor_id = $1 AND day = $2
+           AND is_break = false
+           AND start_time < $3 AND end_time > $4`,
+        [instructor_id, pref.day, pref.time_end, pref.time_start]
+      );
+
+      const windowDuration = pref.time_end - pref.time_start;
+      const totalSlots = Math.ceil(windowDuration / 0.5);
+
+      occupancy.push({
+        prefId: pref.id,
+        day: pref.day,
+        priority: pref.priority,
+        occupiedCount: parseInt(count.rows[0].occupied),
+        totalSlots,
+        percentage: totalSlots > 0 ? Math.round((parseInt(count.rows[0].occupied) / totalSlots) * 100) : 0,
+      });
+    }
+    res.json(occupancy);
+  } catch (err) {
+    console.error("Error fetching occupancy:", err);
+    res.status(400).json({ error: err.message });
+  }
+});
+
+// 6️⃣ GET overview of all instructors with preferences
+app.get("/api/instructor-preferences-overview", isAuthenticated, async (req, res) => {
+  const { semester } = req.query;
+  
+  try {
+    // Get all instructors who have preferences in this semester
+    const instResult = await pool.query(
+      `SELECT DISTINCT i.id, i.name
+       FROM instructors i
+       INNER JOIN instructor_preferences ip ON i.id = ip.instructor_id
+       WHERE ip.semester = $1
+       ORDER BY i.name ASC`,
+      [semester]
+    );
+
+    const overview = [];
+
+    // For each instructor, get all their preferences and occupancy data
+    for (const inst of instResult.rows) {
+      // Get all preferences for this instructor
+      const prefsResult = await pool.query(
+        `SELECT id, day, time_start, time_end, priority
+         FROM instructor_preferences
+         WHERE instructor_id = $1 AND semester = $2
+         ORDER BY day, time_start ASC`,
+        [inst.id, semester]
+      );
+
+      // Get occupancy for all preferences
+      const occupancyData = [];
+      for (const pref of prefsResult.rows) {
+        const countResult = await pool.query(
+          `SELECT COUNT(*) as occupied
+           FROM schedules
+           WHERE instructor_id = $1 AND day = $2
+             AND is_break = false
+             AND start_time < $3 AND end_time > $4`,
+          [inst.id, pref.day, pref.time_end, pref.time_start]
+        );
+
+        const windowDuration = pref.time_end - pref.time_start;
+        const totalSlots = Math.ceil(windowDuration / 0.5);
+
+        occupancyData.push({
+          prefId: pref.id,
+          occupiedCount: parseInt(countResult.rows[0].occupied),
+          totalSlots,
+          percentage: totalSlots > 0 ? Math.round((parseInt(countResult.rows[0].occupied) / totalSlots) * 100) : 0,
+        });
+      }
+
+      overview.push({
+        instructorId: inst.id,
+        instructorName: inst.name,
+        preferences: prefsResult.rows,
+        occupancy: occupancyData,
+      });
+    }
+
+    console.log("Overview endpoint - returning:", overview.length, "instructors");
+    res.json(overview);
+  } catch (err) {
+    console.error("Error fetching overview:", err);
+    res.status(400).json({ error: err.message });
+  }
+});
+
+// ════════════════════════════════════════════════════════════
+// END OF INSTRUCTOR PREFERENCES ENDPOINTS
+// ════════════════════════════════════════════════════════════
+
+// End of new endpoint
+
+
+
+
+
+
+// END: INSTRUCTOR PREFERENCES API ENDPOINTS
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 /* ══════════════════════════ INSTRUCTOR POOL ══════════════════════════ */
 
