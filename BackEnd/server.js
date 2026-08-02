@@ -970,25 +970,7 @@ app.get("/api/instructors", isAuthenticated, async (req, res) => {
   }
 });
 
-// ════════════════════════════════════════════════════════════
-// INSTRUCTOR PREFERENCES ENDPOINTS
-// ════════════════════════════════════════════════════════════
 
-// 1️⃣ GET all preferences for an instructor
-
-// GET /api/instructor-preferences?instructor_id=X&semester=Y
-
-
-
-
-
-
-
-
-
-
-
-// END: INSTRUCTOR PREFERENCES API ENDPOINTS
 
 
 
