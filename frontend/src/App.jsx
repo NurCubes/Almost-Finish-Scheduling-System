@@ -1050,7 +1050,29 @@ function EditModal({ block, onSave, onClose, theme, allSchedules = [], instructo
 /* ════════ WEEKLY GRID — INSTRUCTOR LOAD ════════
    NOW WITH PREFERENCE SUPPORT
    ════════════════════════════════════════════════ */
-function WeeklyGrid({ grid, setGrid, theme, preferences = [], occupancy = [] }) {
+/* ════════ WEEKLY GRID — INSTRUCTOR LOAD ════════
+   NOW WITH PREFERENCE SUPPORT + SUBJECT/SECTION DROPDOWNS
+   (subjects limited to what this instructor is assigned to teach,
+    sections pulled from Section Pool)
+   ════════════════════════════════════════════════ */
+function WeeklyGrid({ grid, setGrid, theme, preferences = [], occupancy = [], selectedInstructor, activeSemester, sectionPoolList = [] }) {
+  const [assignedSubjects, setAssignedSubjects] = useState([]);
+
+  // Load this instructor's assigned subjects for the active semester
+  useEffect(() => {
+    if (!selectedInstructor) { setAssignedSubjects([]); return; }
+    fetch(`/api/instructor-assignments?semester=${encodeURIComponent(activeSemester || "")}`, { credentials: "include" })
+      .then(r => r.ok ? r.json() : [])
+      .then(list => {
+        if (!Array.isArray(list)) { setAssignedSubjects([]); return; }
+        setAssignedSubjects(list.filter(a => normName(a.instructor_name) === normName(selectedInstructor)));
+      })
+      .catch(() => setAssignedSubjects([]));
+  }, [selectedInstructor, activeSemester]);
+
+  const geSubjects    = assignedSubjects.filter(s => s.subject_type === "GE");
+  const majorSubjects = assignedSubjects.filter(s => s.subject_type !== "GE");
+
   const upd = (day, t, field, val) => {
     setGrid(prev => {
       const ex = prev[day]?.[t] || { subject: "", room: "", roomType: "Lecture", section: "" };
@@ -1064,7 +1086,7 @@ function WeeklyGrid({ grid, setGrid, theme, preferences = [], occupancy = [] }) 
   // Get preference color for a time slot
   const getPreferenceColor = (day, t) => {
     if (!preferences || preferences.length === 0) return "transparent";
-    
+
     const timeEnd = +(t + TIME_STEP).toFixed(1);
     for (const pref of preferences) {
       if (pref.day === day && t < pref.time_end && timeEnd > pref.time_start) {
@@ -1223,22 +1245,61 @@ function WeeklyGrid({ grid, setGrid, theme, preferences = [], occupancy = [] }) 
                         transition: "background-color 0.15s",
                       }}
                     >
-                      <input
-                        style={{
-                          width: "100%",
-                          padding: "5px 7px",
-                          border: `1px solid ${theme.border}`,
-                          borderRadius: 4,
-                          fontSize: 12,
-                          minWidth: 100,
-                          marginBottom: 4,
-                          boxSizing: "border-box",
-                        }}
-                        value={sub}
-                        placeholder="Subject"
-                        onChange={e => upd(day, t, "subject", e.target.value)}
-                      />
-                      <input
+                      {/* SUBJECT DROPDOWN — limited to this instructor's assigned subjects */}
+                      {assignedSubjects.length > 0 ? (
+                        <select
+                          style={{
+                            width: "100%",
+                            padding: "5px 7px",
+                            border: `1px solid ${theme.border}`,
+                            borderRadius: 4,
+                            fontSize: 12,
+                            marginBottom: 4,
+                            boxSizing: "border-box",
+                            color: sub ? "#0f172a" : "#94a3b8",
+                            background: "#fff",
+                          }}
+                          value={sub}
+                          onChange={e => upd(day, t, "subject", e.target.value)}
+                        >
+                          <option value="">— Subject —</option>
+                          {geSubjects.length > 0 && (
+                            <optgroup label="🌐 GE Subjects">
+                              {geSubjects.map(s => (
+                                <option key={s.id} value={s.subject_name}>
+                                  {s.subject_name}
+                                </option>
+                              ))}
+                            </optgroup>
+                          )}
+                          {majorSubjects.length > 0 && (
+                            <optgroup label="🎯 Major Subjects">
+                              {majorSubjects.map(s => (
+                                <option key={s.id} value={s.subject_name}>
+                                  {s.subject_name}
+                                </option>
+                              ))}
+                            </optgroup>
+                          )}
+                        </select>
+                      ) : (
+                        <div
+                          style={{
+                            fontSize: 11,
+                            color: "#ef4444",
+                            padding: "4px 6px",
+                            marginBottom: 4,
+                            background: "#fff0f0",
+                            borderRadius: 4,
+                            border: "1px solid #fca5a5",
+                          }}
+                        >
+                          ⚠ No subjects assigned
+                        </div>
+                      )}
+
+                      {/* SECTION DROPDOWN — pulled from Section Pool */}
+                      <select
                         style={{
                           width: "100%",
                           padding: "5px 7px",
@@ -1253,10 +1314,26 @@ function WeeklyGrid({ grid, setGrid, theme, preferences = [], occupancy = [] }) 
                           fontWeight: 600,
                         }}
                         value={sec}
-                        placeholder={`${theme.code} Section`}
                         disabled={!sub}
                         onChange={e => upd(day, t, "section", e.target.value)}
-                      />
+                      >
+                        <option value="">— Section —</option>
+                        {[1, 2, 3, 4].map(y => {
+                          const list = sectionPoolList.filter(s => s.year_level === y);
+                          if (!list.length) return null;
+                          return (
+                            <optgroup key={y} label={YEAR_LEVEL_LABELS[y]}>
+                              {list.map(s => (
+                                <option key={s.id} value={s.section_name}>
+                                  {s.section_name}
+                                </option>
+                              ))}
+                            </optgroup>
+                          );
+                        })}
+                      </select>
+
+                      {/* ROOM DROPDOWN — now includes TBA */}
                       <select
                         style={{
                           width: "100%",
@@ -1276,6 +1353,9 @@ function WeeklyGrid({ grid, setGrid, theme, preferences = [], occupancy = [] }) 
                         onChange={e => upd(day, t, "room", e.target.value)}
                       >
                         <option value="">— Select Room —</option>
+                        <option value="TBA" style={{ fontWeight: 700, color: "#d97706" }}>
+                          📌 TBA (To Be Arranged)
+                        </option>
                         <optgroup label="Lecture Rooms">
                           {LECTURE_ROOMS.map(r => (
                             <option key={r} value={r}>
@@ -1373,7 +1453,6 @@ function WeeklyGrid({ grid, setGrid, theme, preferences = [], occupancy = [] }) 
     </div>
   );
 }
-
 
 /* ════════════════════════════════════════════════════════════
    STUDENT WEEKLY GRID
@@ -1878,7 +1957,7 @@ function PrintModal({ schedules, academicYear, semester, onClose, theme, codeMap
               </div>
             );
           })}
-          <SignatureBlock theme={theme} />
+        
         </div>
       </div>
     </div>
@@ -1979,7 +2058,7 @@ win.document.write(`<!DOCTYPE html><html><head><title>Student Schedule - ${secti
               })}
             </tbody>
           </table>
-          <SignatureBlock theme={theme} />
+      
         </div>
       </div>
     </div>
@@ -2099,7 +2178,7 @@ function RoomPrintModal({ room, blocks, academicYear, semester, onClose, theme, 
               })}
             </tbody>
           </table>
-          <SignatureBlock theme={theme} />
+      
         </div>
       </div>
     </div>
@@ -4261,21 +4340,7 @@ function InlineScheduleGrid({ schedules, allSchedules, academicYear, semester, o
                 </table>
               </div>
 
-              {/* COMPACT SIGNATURE BLOCK */}
-              <div className="signature-block">
-                <div className="signature-row">
-                  <div className="signature-item">
-                    <div className="signature-line"></div>
-                    <div className="signature-name">MYLEN B. PADERES</div>
-                    <div className="signature-title">Dean SOICT</div>
-                  </div>
-                  <div className="signature-item">
-                    <div className="signature-line"></div>
-                    <div className="signature-name">HEIDI A. PAMA</div>
-                    <div className="signature-title">Academic Coordinator</div>
-                  </div>
-                </div>
-              </div>
+              
             </div>
 
             {!collapsed[inst] && (
@@ -4983,23 +5048,7 @@ function InlineStudentGrid({ schedules, allSchedules, academicYear, semester, on
                 </table>
               </div>
 
-              {/* COMPACT SIGNATURE BLOCK */}
-              <div className="signature-block">
-                <div className="signature-row">
-                  <div className="signature-item">
-                    <div className="signature-label">Noted by:</div>
-                    <div className="signature-line"></div>
-                    <div className="signature-name">MYLEN B. PADERES</div>
-                    <div className="signature-title">Dean SOICT</div>
-                  </div>
-                  <div className="signature-item">
-                    <div className="signature-label">Approved by:</div>
-                    <div className="signature-line"></div>
-                    <div className="signature-name">HEIDI A. PAMA</div>
-                    <div className="signature-title">Academic Coordinator</div>
-                  </div>
-                </div>
-              </div>
+           
             </div>
 
             {!collapsed[sec] && (
@@ -5709,21 +5758,7 @@ function InlineRoomGrid({ instructorSchedules, studentSchedules, allSchedules, a
                 </table>
               </div>
 
-              {/* Signature block (no lunch styling) */}
-              <div className="signature-block">
-                <div className="signature-row">
-                  <div className="signature-item">
-                    <div className="signature-line"></div>
-                    <div className="signature-name">MYLEN B. PADERES</div>
-                    <div className="signature-title">Dean SOICT</div>
-                  </div>
-                  <div className="signature-item">
-                    <div className="signature-line"></div>
-                    <div className="signature-name">HEIDI A. PAMA</div>
-                    <div className="signature-title">Academic Coordinator</div>
-                  </div>
-                </div>
-              </div>
+             
             </div>
             
             {/* Display grid (on-screen table) */}
@@ -6303,56 +6338,6 @@ if (activePage==="Academic Setup") {
         }
       } catch {}
 
-// Add this to your existing grid rendering (in InstructorLoad or StudentLoad)
-
-// At the top of your grid, show preference summary:
-{selectedInstructor && occupancy && (
-  <div style={{ display: "flex", gap: 12, flexWrap: "wrap", marginBottom: 16, padding: "12px 16px", background: theme.light2, borderRadius: 8, border: `1px solid ${theme.border}` }}>
-    <div style={{ fontSize: 12, fontWeight: 700, color: theme.text }}>Your Preference Windows:</div>
-    {occupancy
-      .filter(o => o.priority === "primary")
-      .map(o => (
-        <span key={`${o.day}-${o.priority}`} style={{ padding: "3px 12px", borderRadius: 20, fontSize: 11, fontWeight: 600, background: o.percentage >= 80 ? "#fee2e2" : o.percentage >= 50 ? "#fef9c3" : "#dcfce7", color: o.percentage >= 80 ? "#dc2626" : o.percentage >= 50 ? "#854d0e" : "#166534", border: o.percentage >= 80 ? "1px solid #fca5a5" : o.percentage >= 50 ? "1px solid #fde68a" : "1px solid #86efac" }}>
-          🎯 {o.day}: {o.percentage}% ({o.occupiedCount}/{o.totalSlots})
-        </span>
-      ))}
-    {occupancy
-      .filter(o => o.priority === "secondary")
-      .map(o => (
-        <span key={`${o.day}-${o.priority}`} style={{ padding: "3px 12px", borderRadius: 20, fontSize: 11, fontWeight: 600, background: "#f1f5f9", color: "#64748b", border: "1px solid #cbd5e1" }}>
-          📋 {o.day}: {o.percentage}%
-        </span>
-      ))}
-  </div>
-)}
-
-// In your table cell rendering:
-const getPreferenceColor = (day, startTime, endTime, preferences) => {
-  // Returns the cell background color based on preference match
-  if (!preferences || preferences.length === 0) return "transparent";
-  
-  for (const pref of preferences) {
-    if (pref.day === day && startTime < pref.time_end && endTime > pref.time_start) {
-      return pref.priority === "primary" ? "#ecfdf5" : "#fffbeb"; // Green for primary, yellow for secondary
-    }
-  }
-  return "#f8fafc"; // Light gray if outside preferences
-};
-
-// Apply to cell style:
-<td
-  style={{
-    border: "1px solid #ddd",
-    padding: "10px 12px",
-    background: getPreferenceColor(day, t, t + TIME_STEP, preferences),
-    // ... rest of styles
-  }}
->
-  {/* cell content */}
-</td>
-
-
-
       const blocks=DAYS.flatMap(day=>{ const dayBlocks=rawBlocks.filter(b=>b.day===day); return insertBreaks(dayBlocks); });
       const realBlocks=blocks.filter(b=>!b.is_break);
       const combined=[...allRealSchedules,...realBlocks];
@@ -6367,65 +6352,63 @@ const getPreferenceColor = (day, startTime, endTime, preferences) => {
       // fails), which is why brand-new schedules looked "unsynced" and
       // un-draggable in Instructor/Student/Room output. If the endpoint
       // doesn't hand back inserted rows, fall back to a full refetch.
-     // ── NEW: auto-create the matching STUDENT-side rows so Student Load & Room Schedule stay in sync ──
-     // ── Save the instructor's own schedule blocks first (this was missing) ──
-  let savedInstructorRows = null;
-  try {
-    const res = await fetch("/api/schedules", {
-      method: "POST", credentials: "include",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ schedules: realBlocks, academicYearId: data.academicYearId || null }),
-    });
-    const saved = res.ok ? await res.json() : null;
-    if (!res.ok) { alert((saved && saved.error) || "Failed to save instructor schedule."); return; }
-    savedInstructorRows = Array.isArray(saved) ? saved : (Array.isArray(saved?.schedules) ? saved.schedules : null);
-  } catch { alert("Network error while saving instructor schedule."); return; }
+      let savedInstructorRows = null;
+      try {
+        const res = await fetch("/api/schedules", {
+          method: "POST", credentials: "include",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ schedules: realBlocks, academicYearId: data.academicYearId || null }),
+        });
+        const saved = res.ok ? await res.json() : null;
+        if (!res.ok) { alert((saved && saved.error) || "Failed to save instructor schedule."); return; }
+        savedInstructorRows = Array.isArray(saved) ? saved : (Array.isArray(saved?.schedules) ? saved.schedules : null);
+      } catch { alert("Network error while saving instructor schedule."); return; }
 
-  if (savedInstructorRows && savedInstructorRows.length) {
-    setData(p => ({ ...p, schedules: [...p.schedules, ...savedInstructorRows] }));
-  } else {
-    try {
-      const refetch = await fetch("/api/schedules", { credentials: "include" });
-      const allRows = refetch.ok ? await refetch.json() : [];
-      const filtered = deptCode ? allRows.filter(s => !s.dept_code || s.dept_code === deptCode) : allRows;
-      setData(p => ({ ...p, schedules: Array.isArray(filtered) ? filtered : p.schedules }));
-      savedInstructorRows = Array.isArray(filtered) ? filtered : realBlocks;
-    } catch { savedInstructorRows = realBlocks; }
-  }
-
-  // ── auto-create the matching STUDENT-side rows so Student Load & Room Schedule stay in sync ──
-  try {
-    const studentBlocksToCreate = [];
-    for (const rb of savedInstructorRows) {
-      if (!rb.section?.trim()) continue;
-      const existingLinked = findLinkedBlock(rb, data.studentSchedules);
-      if (existingLinked) continue;
-      studentBlocksToCreate.push({
-        section: rb.section, subject: rb.subject, day: rb.day,
-        start: rb.start, end: rb.end, room: rb.room, roomType: rb.roomType,
-        instructor: selectedInstructor, is_break: false,
-      });
-    }
-    if (studentBlocksToCreate.length) {
-      const sres = await fetch("/api/student-schedules", {
-        method: "POST", credentials: "include",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ schedules: studentBlocksToCreate, academicYearId: data.academicYearId || null }),
-      });
-      const ssaved = sres.ok ? await sres.json() : null;
-      const insertedStudentRows = Array.isArray(ssaved) ? ssaved : (Array.isArray(ssaved?.schedules) ? ssaved.schedules : null);
-      if (insertedStudentRows && insertedStudentRows.length) {
-        setData(p => ({ ...p, studentSchedules: [...p.studentSchedules, ...insertedStudentRows] }));
+      if (savedInstructorRows && savedInstructorRows.length) {
+        setData(p => ({ ...p, schedules: [...p.schedules, ...savedInstructorRows] }));
       } else {
-        const refetchS = await fetch("/api/student-schedules", { credentials: "include" });
-        const allSRows = refetchS.ok ? await refetchS.json() : [];
-        const filteredS = deptCode ? allSRows.filter(s => !s.dept_code || s.dept_code === deptCode) : allSRows;
-        setData(p => ({ ...p, studentSchedules: Array.isArray(filteredS) ? filteredS : p.studentSchedules }));
+        try {
+          const refetch = await fetch("/api/schedules", { credentials: "include" });
+          const allRows = refetch.ok ? await refetch.json() : [];
+          const filtered = deptCode ? allRows.filter(s => !s.dept_code || s.dept_code === deptCode) : allRows;
+          setData(p => ({ ...p, schedules: Array.isArray(filtered) ? filtered : p.schedules }));
+          savedInstructorRows = Array.isArray(filtered) ? filtered : realBlocks;
+        } catch { savedInstructorRows = realBlocks; }
       }
-    }
-    alert("✅ Instructor schedule saved!");
-  } catch { /* linked creation is non-fatal; instructor schedule already saved */ }
-     setGrid({});
+
+      // ── auto-create the matching STUDENT-side rows so Student Load & Room Schedule stay in sync ──
+      try {
+        const studentBlocksToCreate = [];
+        for (const rb of savedInstructorRows) {
+          if (!rb.section?.trim()) continue;
+          const existingLinked = findLinkedBlock(rb, data.studentSchedules);
+          if (existingLinked) continue;
+          studentBlocksToCreate.push({
+            section: rb.section, subject: rb.subject, day: rb.day,
+            start: rb.start, end: rb.end, room: rb.room, roomType: rb.roomType,
+            instructor: selectedInstructor, is_break: false,
+          });
+        }
+        if (studentBlocksToCreate.length) {
+          const sres = await fetch("/api/student-schedules", {
+            method: "POST", credentials: "include",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ schedules: studentBlocksToCreate, academicYearId: data.academicYearId || null }),
+          });
+          const ssaved = sres.ok ? await sres.json() : null;
+          const insertedStudentRows = Array.isArray(ssaved) ? ssaved : (Array.isArray(ssaved?.schedules) ? ssaved.schedules : null);
+          if (insertedStudentRows && insertedStudentRows.length) {
+            setData(p => ({ ...p, studentSchedules: [...p.studentSchedules, ...insertedStudentRows] }));
+          } else {
+            const refetchS = await fetch("/api/student-schedules", { credentials: "include" });
+            const allSRows = refetchS.ok ? await refetchS.json() : [];
+            const filteredS = deptCode ? allSRows.filter(s => !s.dept_code || s.dept_code === deptCode) : allSRows;
+            setData(p => ({ ...p, studentSchedules: Array.isArray(filteredS) ? filteredS : p.studentSchedules }));
+          }
+        }
+        alert("✅ Instructor schedule saved!");
+      } catch { /* linked creation is non-fatal; instructor schedule already saved */ }
+      setGrid({});
     };
 
     const regular  = instructorPoolList.filter(i => !i.employment_type || i.employment_type === "Regular" || i.employment_type === "Permanent");
@@ -6433,20 +6416,15 @@ const getPreferenceColor = (day, startTime, endTime, preferences) => {
 
     return (
       <div style={cardStyle}>
-{toast && (
+        {toast && (
           <ConflictToast
             conflicts={toast}
             allSchedules={allRealSchedules}
             onClose={() => setToast(null)}
             onMoveSchedule={async (block, sg) => {
               if (block.id) {
-                // Conflict involves an already-saved schedule — apply the fix
-                // the same way the drag-and-drop grid does.
                 await handleLinkedMove(block, sg, "instructor");
               } else {
-                // Conflict involves an entry still pending on this form —
-                // move it inside the grid so the change is visible right
-                // away and gets saved when "Save Weekly Schedule" is clicked.
                 moveGridBlock(setGrid, block, sg, { section: block.section || "" });
               }
               setToast(null);
@@ -6480,7 +6458,6 @@ const getPreferenceColor = (day, startTime, endTime, preferences) => {
             <div style={{marginTop:8,padding:"8px 14px",background:theme.light2,border:`1px solid ${theme.border}`,borderRadius:7,fontSize:12,color:theme.text,display:"flex",alignItems:"center",gap:8}}>
               <span style={{fontSize:16}}>👨‍🏫</span>
               <span>Entering schedule for <strong>{selectedInstructor}</strong></span>
-              {/* ── Show instructor current load vs max load inline ── */}
               {(() => {
                 const instObj = instructorPoolList.find(i => i.name === selectedInstructor);
                 const maxLoad = instObj?.max_load || 0;
@@ -6511,12 +6488,20 @@ const getPreferenceColor = (day, startTime, endTime, preferences) => {
           <span style={{padding:"4px 12px",borderRadius:20,fontSize:12,fontWeight:600,background:theme.light2,color:theme.text,border:`1px solid ${theme.border}`}}>🔬 Lab A/B/C = Laboratory</span>
           <span style={{padding:"4px 12px",borderRadius:20,fontSize:12,fontWeight:600,background:"#fef9c3",color:"#854d0e",border:"1px solid #fde68a"}}>☕ Breaks auto-inserted after every {BREAK_TRIGGER} hrs</span>
         </div>
-        {selectedInstructor && <WeeklyGrid grid={grid} setGrid={setGrid} theme={theme}/>}
+        {selectedInstructor && (
+          <WeeklyGrid
+            grid={grid}
+            setGrid={setGrid}
+            theme={theme}
+            selectedInstructor={selectedInstructor}
+            activeSemester={activeSemester}
+            sectionPoolList={sectionPoolList}
+          />
+        )}
         {selectedInstructor && <button style={{...btnStyle,boxShadow:`0 4px 14px ${theme.border}`}} onClick={saveSchedule}>💾 Save Weekly Schedule</button>}
       </div>
     );
   }
-
   /* ── STUDENT LOAD ── */
   if (activePage==="Student Load") {
     // ── MODIFIED: check subject hour_load before saving ──
